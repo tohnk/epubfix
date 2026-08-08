@@ -1,0 +1,207 @@
+//! epubfix — repair common EPUB 2 validation errors in place.
+//!
+//! Drop the executable into a folder full of `.epub` files and run it. With no
+//! arguments it scans the folder the executable itself lives in, fixes what it
+//! can, and leaves everything else alone.
+
+use std::env;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use epubfix::{Options, collect_epubs, fix_file, fixers};
+
+const USAGE: &str = "\
+epubfix — repair common EPUB 2 validation errors in place.
+
+USAGE:
+    epubfix [OPTIONS] [FILE_OR_DIR ...]
+
+With no FILE_OR_DIR, every .epub in the folder containing the executable is
+processed, so the tool can simply be dropped into a folder and run.
+
+OPTIONS:
+    -n, --dry-run       report what would change; write nothing
+        --no-backup     do not keep a .bak copy of the original
+    -r, --recursive     descend into subdirectories when scanning a folder
+        --only NAMES    run only these fixers (comma-separated, see --list)
+    -l, --list          list the available fixers and exit
+        --pause         wait for Enter before exiting
+    -h, --help          show this help and exit
+    -V, --version       show the version and exit
+    --                  treat all remaining arguments as paths
+
+A .bak copy is written beside each book that is modified, unless one already
+exists — a second run never overwrites the pristine original.";
+
+struct Args {
+    opts: Options,
+    paths: Vec<String>,
+    recursive: bool,
+    pause: Option<bool>,
+}
+
+fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
+    let mut parsed = Args {
+        opts: Options::default(),
+        paths: Vec::new(),
+        recursive: false,
+        pause: None,
+    };
+    let mut it = argv.into_iter();
+    let mut literal = false;
+
+    while let Some(a) = it.next() {
+        if literal || !a.starts_with('-') || a == "-" {
+            parsed.paths.push(a);
+            continue;
+        }
+        match a.as_str() {
+            "--" => literal = true,
+            "-n" | "--dry-run" => parsed.opts.dry_run = true,
+            "--no-backup" => parsed.opts.backup = false,
+            "-r" | "--recursive" => parsed.recursive = true,
+            "--pause" => parsed.pause = Some(true),
+            "--no-pause" => parsed.pause = Some(false),
+            "-l" | "--list" => {
+                list_fixers();
+                return Ok(None);
+            }
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(None);
+            }
+            "-V" | "--version" => {
+                println!("epubfix {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
+            "--only" => {
+                let v = it.next().ok_or("--only needs a comma-separated list")?;
+                parsed.opts.only.extend(split_names(&v));
+            }
+            _ => match a.strip_prefix("--only=") {
+                Some(v) => parsed.opts.only.extend(split_names(v)),
+                None => return Err(format!("unknown option `{a}` (try --help)")),
+            },
+        }
+    }
+
+    let known: Vec<&str> = fixers::all().iter().map(|f| f.name()).collect();
+    if let Some(bad) = parsed
+        .opts
+        .only
+        .iter()
+        .find(|n| !known.contains(&n.as_str()))
+    {
+        return Err(format!("unknown fixer `{bad}` (try --list)"));
+    }
+
+    Ok(Some(parsed))
+}
+
+fn split_names(v: &str) -> Vec<String> {
+    v.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn list_fixers() {
+    println!("Available fixers:\n");
+    for f in fixers::all() {
+        println!(
+            "  {:<16} {:<20} {}",
+            f.name(),
+            f.codes().join(", "),
+            f.description()
+        );
+    }
+}
+
+/// Where to look when the user gave no paths: the folder holding the executable,
+/// falling back to the working directory if that cannot be determined.
+fn default_dir() -> PathBuf {
+    env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn main() -> ExitCode {
+    let args = match parse_args(env::args().skip(1).collect()) {
+        Ok(Some(a)) => a,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("epubfix: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let scanned = args.paths.is_empty();
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if scanned {
+        let dir = default_dir();
+        println!("Scanning {} ...", dir.display());
+        targets = collect_epubs(&dir, args.recursive);
+    } else {
+        for a in &args.paths {
+            let p = PathBuf::from(a);
+            if p.is_dir() {
+                targets.extend(collect_epubs(&p, args.recursive));
+            } else {
+                targets.push(p);
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        println!("No .epub files found.");
+    }
+
+    let (mut fixed, mut clean, mut failed) = (0u32, 0u32, 0u32);
+    for p in &targets {
+        let name = p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        match fix_file(p, &args.opts) {
+            Ok(changes) if changes.is_empty() => {
+                println!("{name}: nothing to do");
+                clean += 1;
+            }
+            Ok(changes) => {
+                let label = if args.opts.dry_run { " (dry run)" } else { "" };
+                println!("{name}:{label}\n    {}", changes.join("\n    "));
+                fixed += 1;
+            }
+            Err(e) => {
+                eprintln!("{name}: FAILED ({e})");
+                failed += 1;
+            }
+        }
+    }
+
+    let verb = if args.opts.dry_run {
+        "would fix"
+    } else {
+        "fixed"
+    };
+    println!("\nDone: {fixed} {verb}, {clean} already clean, {failed} failed.");
+
+    // Launched by double-click, the console closes the moment we return.
+    let pause = args
+        .pause
+        .unwrap_or(scanned && cfg!(windows) && io::stdin().is_terminal());
+    if pause {
+        print!("Press Enter to exit...");
+        io::stdout().flush().ok();
+        io::stdin().read_line(&mut String::new()).ok();
+    }
+
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
