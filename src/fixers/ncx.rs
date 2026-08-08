@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use regex::{Captures, NoExpand, Regex};
 
 use crate::book::Book;
-use crate::fixers::Fixer;
+use crate::fixers::{Fixer, Outcome};
 use crate::util::re;
 
 static NAV_TAG_RE: LazyLock<Regex> =
@@ -35,12 +35,12 @@ impl Fixer for PlayOrder {
         "renumber toc.ncx playOrder consecutively from 1"
     }
 
-    fn apply(&self, book: &mut Book) -> Vec<String> {
+    fn apply(&self, book: &mut Book) -> Outcome {
         let Some(name) = book.ncx_name().map(str::to_owned) else {
-            return Vec::new();
+            return Outcome::none();
         };
         let Some(text) = book.ncx_text().map(str::to_owned) else {
-            return Vec::new();
+            return Outcome::none();
         };
 
         let mut seen: HashMap<String, usize> = HashMap::new();
@@ -70,10 +70,10 @@ impl Fixer for PlayOrder {
             .into_owned();
 
         if new == text {
-            return Vec::new();
+            return Outcome::none();
         }
         book.set_text(&name, new);
-        vec![format!("renumbered playOrder ({counter} target(s))")]
+        Outcome::change(format!("renumbered playOrder ({counter} target(s))"))
     }
 }
 
@@ -91,26 +91,26 @@ impl Fixer for DtbUid {
         "sync toc.ncx dtb:uid to the OPF unique-identifier"
     }
 
-    fn apply(&self, book: &mut Book) -> Vec<String> {
+    fn apply(&self, book: &mut Book) -> Outcome {
         let Some(name) = book.ncx_name().map(str::to_owned) else {
-            return Vec::new();
+            return Outcome::none();
         };
         let Some(text) = book.ncx_text().map(str::to_owned) else {
-            return Vec::new();
+            return Outcome::none();
         };
         let Some(opf) = book.opf_text().map(str::to_owned) else {
-            return Vec::new();
+            return Outcome::none();
         };
 
         let Some(um) = UNIQUE_ID_RE.captures(&opf) else {
-            return Vec::new();
+            return Outcome::none();
         };
         let ident_re = re(&format!(
             r#"(?s)<dc:identifier[^>]*\bid="{}"[^>]*>\s*([^<]*?)\s*<"#,
             regex::escape(&um[1])
         ));
         let Some(im) = ident_re.captures(&opf) else {
-            return Vec::new();
+            return Outcome::none();
         };
         let ident = im[1].to_string();
 
@@ -127,9 +127,9 @@ impl Fixer for DtbUid {
             .into_owned();
 
         if new == text {
-            return Vec::new();
+            return Outcome::none();
         }
         book.set_text(&name, new);
-        vec!["synced NCX dtb:uid to OPF identifier".into()]
+        Outcome::change("synced NCX dtb:uid to OPF identifier")
     }
 }

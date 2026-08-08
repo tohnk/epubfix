@@ -8,6 +8,8 @@
 
 pub mod book;
 pub mod fixers;
+pub mod markup;
+pub mod refs;
 pub mod util;
 
 use std::fmt;
@@ -16,7 +18,7 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 pub use book::Book;
-pub use fixers::Fixer;
+pub use fixers::{Fixer, Outcome};
 
 #[derive(Debug)]
 pub enum Error {
@@ -78,27 +80,28 @@ impl Default for Options {
     }
 }
 
-/// Run every fixer over `book`, returning one line per change.
-pub fn fix_book(book: &mut Book) -> Vec<String> {
+/// Run every fixer over `book`.
+pub fn fix_book(book: &mut Book) -> Outcome {
     fix_book_with(book, &fixers::all())
 }
 
 /// Run a chosen set of fixers over `book`, in the order given.
-pub fn fix_book_with(book: &mut Book, fixers: &[Box<dyn Fixer>]) -> Vec<String> {
-    let mut changes = Vec::new();
+pub fn fix_book_with(book: &mut Book, fixers: &[Box<dyn Fixer>]) -> Outcome {
+    let mut outcome = Outcome::none();
     for f in fixers {
-        changes.extend(f.apply(book));
+        outcome.merge(f.apply(book));
     }
-    changes
+    outcome
 }
 
 /// Repair one EPUB in place.
 ///
-/// Returns the list of changes made — empty means the file was already clean and
-/// was not rewritten. The replacement is staged in a sibling temporary file and
-/// moved into place only once it has been written in full, so an interrupted run
-/// cannot leave a truncated book behind.
-pub fn fix_file(path: &Path, opts: &Options) -> Result<Vec<String>> {
+/// Returns what was changed and what needs a human. No changes means the file
+/// was already clean and was not rewritten — a book that produced only findings
+/// is left untouched too. The replacement is staged in a sibling temporary file
+/// and moved into place only once it has been written in full, so an interrupted
+/// run cannot leave a truncated book behind.
+pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
     let mut book = Book::load(File::open(path)?)?;
 
     let selected: Vec<Box<dyn Fixer>> = if opts.only.is_empty() {
@@ -110,9 +113,9 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Vec<String>> {
             .collect()
     };
 
-    let changes = fix_book_with(&mut book, &selected);
-    if changes.is_empty() || opts.dry_run {
-        return Ok(changes);
+    let outcome = fix_book_with(&mut book, &selected);
+    if !outcome.has_changes() || opts.dry_run {
+        return Ok(outcome);
     }
 
     let tmp = sibling(path, ".epubfix.tmp");
@@ -121,7 +124,7 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Vec<String>> {
         let _ = fs::remove_file(&tmp);
     }
     result?;
-    Ok(changes)
+    Ok(outcome)
 }
 
 fn write_and_replace(book: &Book, path: &Path, tmp: &Path, backup: bool) -> Result<()> {

@@ -32,7 +32,7 @@ fn a_backup_is_written_and_never_overwritten() {
     let book = write(dir.path(), "book.epub", &original);
     let bak = dir.path().join("book.epub.bak");
 
-    let changes = fix_file(&book, &Options::default()).unwrap();
+    let changes = fix_file(&book, &Options::default()).unwrap().changes;
     assert_eq!(changes, vec!["synced NCX dtb:uid to OPF identifier"]);
     assert_eq!(
         fs::read(&bak).unwrap(),
@@ -43,7 +43,7 @@ fn a_backup_is_written_and_never_overwritten() {
 
     // Force a second round of real changes and check the pristine backup survives.
     fs::write(&book, broken()).unwrap();
-    let changes = fix_file(&book, &Options::default()).unwrap();
+    let changes = fix_file(&book, &Options::default()).unwrap().changes;
     assert!(!changes.is_empty());
     assert_eq!(
         fs::read(&bak).unwrap(),
@@ -61,7 +61,7 @@ fn no_backup_leaves_no_bak() {
         ..Options::default()
     };
 
-    assert!(!fix_file(&book, &opts).unwrap().is_empty());
+    assert!(fix_file(&book, &opts).unwrap().has_changes());
     assert!(!dir.path().join("book.epub.bak").exists());
 }
 
@@ -75,7 +75,7 @@ fn dry_run_reports_without_touching_anything() {
         ..Options::default()
     };
 
-    let changes = fix_file(&book, &opts).unwrap();
+    let changes = fix_file(&book, &opts).unwrap().changes;
     assert_eq!(changes, vec!["synced NCX dtb:uid to OPF identifier"]);
     assert_eq!(fs::read(&book).unwrap(), original, "file must be unchanged");
     assert_eq!(
@@ -91,7 +91,7 @@ fn a_clean_book_is_not_rewritten_at_all() {
     let original = make_text_epub(&clean_book());
     let book = write(dir.path(), "book.epub", &original);
 
-    assert!(fix_file(&book, &Options::default()).unwrap().is_empty());
+    assert!(!fix_file(&book, &Options::default()).unwrap().has_changes());
     assert_eq!(
         fs::read(&book).unwrap(),
         original,
@@ -154,7 +154,7 @@ fn only_selects_a_subset_of_fixers() {
         ..Options::default()
     };
 
-    let changes = fix_file(&book, &opts).unwrap();
+    let changes = fix_file(&book, &opts).unwrap().changes;
     assert!(
         changes.is_empty(),
         "the uid fixer was not selected: {changes:?}"

@@ -32,7 +32,17 @@ OPTIONS:
     --                  treat all remaining arguments as paths
 
 A .bak copy is written beside each book that is modified, unless one already
-exists — a second run never overwrites the pristine original.";
+exists — a second run never overwrites the pristine original.
+
+Anything a fixer recognises as wrong but will not repair on its own is listed
+under \"needs manual attention\" instead of being guessed at. Use --dry-run to
+triage a whole library without writing to it.
+
+EXIT STATUS:
+    0  all good
+    1  at least one book failed to process
+    2  bad arguments
+    3  everything worked, but some books need manual attention";
 
 struct Args {
     opts: Options,
@@ -108,10 +118,12 @@ fn split_names(v: &str) -> Vec<String> {
 }
 
 fn list_fixers() {
+    let all = fixers::all();
+    let width = all.iter().map(|f| f.name().len()).max().unwrap_or(0);
     println!("Available fixers:\n");
-    for f in fixers::all() {
+    for f in &all {
         println!(
-            "  {:<16} {:<20} {}",
+            "  {:<width$}  {:<18}  {}",
             f.name(),
             f.codes().join(", "),
             f.description()
@@ -160,24 +172,39 @@ fn main() -> ExitCode {
     }
 
     let (mut fixed, mut clean, mut failed) = (0u32, 0u32, 0u32);
+    let mut attention: Vec<(String, Vec<String>)> = Vec::new();
     for p in &targets {
         let name = p.file_name().map_or_else(
             || p.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
         match fix_file(p, &args.opts) {
-            Ok(changes) if changes.is_empty() => {
-                println!("{name}: nothing to do");
-                clean += 1;
-            }
-            Ok(changes) => {
-                let label = if args.opts.dry_run { " (dry run)" } else { "" };
-                println!("{name}:{label}\n    {}", changes.join("\n    "));
-                fixed += 1;
+            Ok(outcome) => {
+                if outcome.has_changes() {
+                    let label = if args.opts.dry_run { " (dry run)" } else { "" };
+                    println!("{name}:{label}\n    {}", outcome.changes.join("\n    "));
+                    fixed += 1;
+                } else {
+                    println!("{name}: nothing to do");
+                    clean += 1;
+                }
+                if !outcome.findings.is_empty() {
+                    attention.push((name, outcome.findings));
+                }
             }
             Err(e) => {
                 eprintln!("{name}: FAILED ({e})");
                 failed += 1;
+            }
+        }
+    }
+
+    if !attention.is_empty() {
+        println!("\nNeeds manual attention:");
+        for (name, findings) in &attention {
+            println!("  {name}");
+            for f in findings {
+                println!("      {f}");
             }
         }
     }
@@ -187,7 +214,12 @@ fn main() -> ExitCode {
     } else {
         "fixed"
     };
-    println!("\nDone: {fixed} {verb}, {clean} already clean, {failed} failed.");
+    print!("\nDone: {fixed} {verb}, {clean} already clean, {failed} failed");
+    if attention.is_empty() {
+        println!(".");
+    } else {
+        println!(", {} needing a look.", attention.len());
+    }
 
     // Launched by double-click, the console closes the moment we return.
     let pause = args
@@ -199,9 +231,13 @@ fn main() -> ExitCode {
         io::stdin().read_line(&mut String::new()).ok();
     }
 
+    // Distinct codes so a library sweep can be scripted: 1 means something
+    // broke, 3 means everything worked but some books want a human.
     if failed > 0 {
         ExitCode::FAILURE
-    } else {
+    } else if attention.is_empty() {
         ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
     }
 }

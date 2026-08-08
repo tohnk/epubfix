@@ -7,10 +7,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, Write};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
+use crate::refs::ReferenceIndex;
 use crate::util::{MARKUP, TEXTUAL, ends_with_any};
 
 /// One entry of the source archive, kept verbatim.
@@ -88,6 +91,41 @@ impl Book {
             opf,
             ncx,
         })
+    }
+
+    /// Major EPUB version from the package document, e.g. `2` or `3`.
+    ///
+    /// This decides which ruleset a content document is validated against, and
+    /// so which legacy markup is actually an error. Defaults to 2 when there is
+    /// no readable OPF, matching what epubcheck assumes for a bare EPUB.
+    pub fn epub_version(&self) -> u32 {
+        static VER: LazyLock<Regex> =
+            LazyLock::new(|| crate::util::re(r#"<package\b[^>]*?\bversion="(\d+)"#));
+        self.opf_text()
+            .and_then(|t| VER.captures(t))
+            .and_then(|c| c[1].parse().ok())
+            .unwrap_or(2)
+    }
+
+    /// Names of the content documents, in archive order.
+    pub fn markup_names(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|n| ends_with_any(n, MARKUP) && self.texts.contains_key(*n))
+            .cloned()
+            .collect()
+    }
+
+    /// Index every internal link in the book, so fixers can tell whether an
+    /// anchor is live before touching it.
+    pub fn reference_index(&self) -> ReferenceIndex {
+        let mut idx = ReferenceIndex::default();
+        for name in &self.order {
+            if let Some(text) = self.texts.get(name) {
+                idx.add_document(name, text);
+            }
+        }
+        idx
     }
 
     /// Name of the package document, if one was found and is readable.

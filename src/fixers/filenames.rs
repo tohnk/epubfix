@@ -7,7 +7,7 @@
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use crate::book::Book;
-use crate::fixers::Fixer;
+use crate::fixers::{Fixer, Outcome};
 use crate::util::{BAD_CHARS, basename, dirname, safe_filename};
 
 /// The set `urllib.parse.quote` leaves unescaped: `A-Za-z0-9` and `-._~`.
@@ -30,7 +30,7 @@ impl Fixer for UnsafeFilenames {
         "rename resources whose filenames need URL escaping, and update references"
     }
 
-    fn apply(&self, book: &mut Book) -> Vec<String> {
+    fn apply(&self, book: &mut Book) -> Outcome {
         let mut planned: Vec<(String, String)> = Vec::new();
 
         for name in book.names() {
@@ -55,7 +55,7 @@ impl Fixer for UnsafeFilenames {
         }
 
         if planned.is_empty() {
-            return Vec::new();
+            return Outcome::none();
         }
 
         // Longest basename first, so that "ch1 extra.xhtml" is rewritten before a
@@ -89,7 +89,7 @@ impl Fixer for UnsafeFilenames {
             book.rename(old, new.clone());
         }
 
-        vec![format!("renamed {} file(s)", planned.len())]
+        Outcome::change(format!("renamed {} file(s)", planned.len()))
     }
 }
 
@@ -101,13 +101,13 @@ fn uniquify(candidate: &str, taken: impl Fn(&str) -> bool) -> String {
         }
         _ => (candidate, ""),
     };
-    for n in 2.. {
-        let next = format!("{stem}_{n}{ext}");
-        if !taken(&next) {
-            return next;
-        }
+    let mut n = 2u32;
+    let mut candidate = format!("{stem}_{n}{ext}");
+    while taken(&candidate) {
+        n += 1;
+        candidate = format!("{stem}_{n}{ext}");
     }
-    unreachable!("the counter is unbounded")
+    candidate
 }
 
 #[cfg(test)]

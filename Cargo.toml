@@ -10,6 +10,7 @@ readme = "README.md"
 
 [dependencies]
 percent-encoding = "2.3.2"
+quick-xml = "0.41.0"
 regex = "1.13.1"
 # EPUB/OCF permits only Stored and Deflate, so the default codecs (AES, zstd,
 # bzip2, LZMA, PPMd) are dead weight. zlib-rs is pure Rust and needs no C toolchain.

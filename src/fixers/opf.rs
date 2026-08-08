@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::book::Book;
-use crate::fixers::Fixer;
+use crate::fixers::{Fixer, Outcome};
 use crate::util::re;
 
 /// Read the OPF, hand it to `f`, and store the result if it changed.
@@ -39,15 +39,15 @@ impl Fixer for PackageVersion {
     fn description(&self) -> &'static str {
         r#"package version="1.0" -> "2.0""#
     }
-    fn apply(&self, book: &mut Book) -> Vec<String> {
+    fn apply(&self, book: &mut Book) -> Outcome {
         if edit_opf(book, |t| {
             VERSION_RE
                 .replacen(t, 1, r#"${1}version="2.0""#)
                 .into_owned()
         }) {
-            vec!["package version 1.0 -> 2.0".into()]
+            Outcome::change("package version 1.0 -> 2.0")
         } else {
-            Vec::new()
+            Outcome::none()
         }
     }
 }
@@ -68,11 +68,11 @@ impl Fixer for SpinePageMap {
     fn description(&self) -> &'static str {
         "remove the Adobe page-map attribute from <spine>"
     }
-    fn apply(&self, book: &mut Book) -> Vec<String> {
+    fn apply(&self, book: &mut Book) -> Outcome {
         if edit_opf(book, |t| PAGE_MAP_RE.replacen(t, 1, "${1}").into_owned()) {
-            vec!["removed spine/@page-map".into()]
+            Outcome::change("removed spine/@page-map")
         } else {
-            Vec::new()
+            Outcome::none()
         }
     }
 }
@@ -93,11 +93,11 @@ impl Fixer for FontMediaType {
     fn description(&self) -> &'static str {
         r#"fix the "application/application/x-font-ttf" typo"#
     }
-    fn apply(&self, book: &mut Book) -> Vec<String> {
+    fn apply(&self, book: &mut Book) -> Outcome {
         if edit_opf(book, |t| t.replace(BAD_FONT_TYPE, GOOD_FONT_TYPE)) {
-            vec!["corrected font media-type".into()]
+            Outcome::change("corrected font media-type")
         } else {
-            Vec::new()
+            Outcome::none()
         }
     }
 }

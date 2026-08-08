@@ -383,7 +383,7 @@ fn only_runs_the_selected_fixers() {
         .into_iter()
         .filter(|f| f.name() == "ncx-uid")
         .collect();
-    let changes = epubfix::fix_book_with(&mut book, &selected);
+    let changes = epubfix::fix_book_with(&mut book, &selected).changes;
 
     assert_eq!(changes, vec!["synced NCX dtb:uid to OPF identifier"]);
     assert!(

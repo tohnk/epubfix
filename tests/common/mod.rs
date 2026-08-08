@@ -4,6 +4,8 @@
 //! a given file does not use reads as dead code there.
 #![allow(dead_code)]
 
+pub mod verify;
+
 use std::io::{Cursor, Write};
 
 use epubfix::Book;
@@ -54,11 +56,17 @@ pub fn read_epub(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
 
 /// Load, fix, repack. Returns the change list and the resulting archive.
 pub fn roundtrip(bytes: &[u8]) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
+    let (outcome, files) = roundtrip_full(bytes);
+    (outcome.changes, files)
+}
+
+/// As [`roundtrip`], but keeps the findings too.
+pub fn roundtrip_full(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
     let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
-    let changes = epubfix::fix_book(&mut book);
+    let outcome = epubfix::fix_book(&mut book);
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
-    (changes, read_epub(&out.into_inner()))
+    (outcome, read_epub(&out.into_inner()))
 }
 
 /// Text of one entry of a repacked archive.
@@ -134,4 +142,100 @@ pub fn with(
         }
     }
     panic!("no such entry {name}");
+}
+
+// ---------------------------------------------------------------------------
+// Version-specific book builders, for the content-document fixers.
+// ---------------------------------------------------------------------------
+
+fn opf2() -> String {
+    r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
+    <dc:title>Test</dc:title><dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>"#
+        .to_string()
+}
+
+fn opf3() -> String {
+    r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
+    <dc:title>Test</dc:title><dc:language>en</dc:language>
+    <meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="nav"/><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>"#
+        .to_string()
+}
+
+const NAV3: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>Nav</title><meta charset="utf-8"/></head>
+<body><nav epub:type="toc"><ol><li><a href="ch1.xhtml">One</a></li></ol></nav></body></html>"#;
+
+fn chapter(body: &str, v3: bool) -> String {
+    // A <meta name="calibre:cover"> rides along in every chapter: it is valid
+    // markup that an earlier version of the id fixer corrupted.
+    if v3 {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+             <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+             <head><title>T</title><meta charset=\"utf-8\"/>\
+             <meta name=\"calibre:cover\" content=\"true\"/></head>\n\
+             <body>\n{body}\n</body></html>"
+        )
+    } else {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+             <!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \
+             \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n\
+             <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+             <head><title>T</title>\
+             <meta name=\"calibre:cover\" content=\"true\"/></head>\n\
+             <body>\n{body}\n</body></html>"
+        )
+    }
+}
+
+/// An EPUB 2 book with two content documents carrying the given bodies.
+pub fn epub2(ch1_body: &str, ch2_body: &str) -> Vec<u8> {
+    build(false, ch1_body, ch2_body)
+}
+
+/// The same book declared as EPUB 3, so version-gated fixers can be compared.
+pub fn epub3(ch1_body: &str, ch2_body: &str) -> Vec<u8> {
+    build(true, ch1_body, ch2_body)
+}
+
+fn build(v3: bool, ch1_body: &str, ch2_body: &str) -> Vec<u8> {
+    let opf = if v3 { opf3() } else { opf2() };
+    let ch1 = chapter(ch1_body, v3);
+    let ch2 = chapter(ch2_body, v3);
+    let mut files: Vec<(&str, &[u8])> = vec![
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/ch2.xhtml", ch2.as_bytes()),
+    ];
+    if v3 {
+        files.push(("OEBPS/nav.xhtml", NAV3.as_bytes()));
+    } else {
+        files.push(("OEBPS/toc.ncx", CLEAN_NCX.as_bytes()));
+    }
+    make_epub(&files)
 }

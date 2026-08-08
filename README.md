@@ -1,7 +1,8 @@
 # epubfix
 
-Repairs common EPUB 2 validation errors in place — the recurring ones that
-epubcheck flags across a library of books.
+Repairs common EPUB validation errors in place — the recurring ones that
+epubcheck flags across a library of books. Handles both EPUB 2 and EPUB 3, and
+knows the difference: several of these fixes are only correct for one of them.
 
 Drop the executable into a folder full of `.epub` files and run it. With no
 arguments it scans the folder the executable itself lives in (not the working
@@ -13,8 +14,9 @@ Scanning /home/you/Books ...
 Broken Book.epub:
     package version 1.0 -> 2.0
     removed spine/@page-map
-    corrected font media-type
     sanitised 2 id(s)
+    stripped 697 legacy attribute(s) for EPUB 3 [valignx693, borderx4]
+    index_split_212.html: 6 empty anchor(s) removed, 8 anchor id(s) moved to a legal element
     renamed 1 file(s)
     renumbered playOrder (3 target(s))
     synced NCX dtb:uid to OPF identifier
@@ -31,11 +33,38 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
 | `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
+| `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
+| `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
 | `filenames` | RSC-020, PKG-010 | renames resources whose filenames need URL escaping (spaces, non-ASCII, …) and updates every reference, raw or percent-encoded |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |
 | `ncx-uid` | NCX-001 | syncs `dtb:uid` to the OPF `unique-identifier`, byte for byte |
 
 `epubfix --list` prints the same table.
+
+### EPUB 2 and EPUB 3 are not the same job
+
+`legacy-table-attrs` reads the OPF `<package version>` and behaves differently,
+because the two rulesets genuinely differ:
+
+* **EPUB 3** content documents are validated as HTML5, which removed the whole
+  presentational set and restricts `border` to `""` or `"1"`.
+* **EPUB 2** content documents are validated as XHTML 1.1, which *keeps*
+  `align` and `valign` on rows and cells, and `cellpadding`, `cellspacing`,
+  `frame`, `rules`, `width` and any `border` on `<table>`. Only `align`,
+  `valign` and `bgcolor` on `<table>`, `bgcolor` everywhere else, cell
+  `width`/`height`/`nowrap`, and `hspace`/`vspace` are errors.
+
+Stripping attributes that EPUB 2 permits would change how those books render for
+no validation benefit, so it does not. The split was **measured against EPUB
+Check 5.2.1**, not read off a specification, and `tests/content.rs` pins it.
+
+The same version split decides how `misplaced-anchors` repairs things. Moving a
+stranded `<a>` to just after `</table>` is valid in EPUB 3, but in EPUB 2 an
+`<a>` cannot be a child of `<body>` — doing it there would trade one epubcheck
+error for another. So the default repair is to migrate the anchor's *id* onto
+the nearest legal element (the following row, else the preceding one, else the
+table), which is valid under both rulesets and keeps the link landing in the
+same place.
 
 ## Usage
 
@@ -53,7 +82,24 @@ epubfix [OPTIONS] [FILE_OR_DIR ...]
 --                  treat all remaining arguments as paths
 ```
 
-Exit status is `0` on success, `1` if any book failed, `2` for a bad argument.
+| Exit | Meaning |
+| --- | --- |
+| 0 | all good |
+| 1 | at least one book failed to process |
+| 2 | bad arguments |
+| 3 | everything worked, but some books need manual attention |
+
+### Needs manual attention
+
+A fixer that meets something it recognises as wrong but cannot repair safely
+records a **finding** rather than guessing — a stranded anchor with visible text
+in an EPUB 2 book, a stray `<p>` inside a `<table>`, a document that is not
+well-formed. Findings never modify the book; they print at the end of the run
+and set exit status 3.
+
+`epubfix --dry-run -r ~/Books` is therefore a triage pass over a whole library:
+it writes nothing and tells you which handful of books have something genuinely
+unusual in them.
 
 ```sh
 epubfix --dry-run ~/Books          # see what it would do
@@ -74,6 +120,14 @@ epubfix --only ncx-uid book.epub   # just one fix
   already-modified copy. `--no-backup` opts out.
 - **Resources that are not valid UTF-8 are never decoded or touched** — images,
   fonts, and legacy-encoded stylesheets pass through byte for byte.
+- **Content documents are edited by byte splice, never reserialised.** The
+  scanner records the byte range of every tag and attribute and the fixers
+  replace only those ranges, so a document keeps its exact quoting, self-closing
+  syntax and entity references. Anything no fixer touched is unchanged by
+  construction, not by luck.
+- **Links are checked before anchors are touched.** An anchor is only deleted
+  when nothing in the book — content document, NCX or OPF — links to it, and an
+  id is only moved onto an element that does not already have one.
 - **`mimetype` is rewritten first and uncompressed**, with no extra field, as
   OCF requires.
 - Entry order, per-entry compression method, and timestamps are preserved.
@@ -103,19 +157,21 @@ unit struct implementing `Fixer`:
 
 ```rust
 pub trait Fixer {
-    fn name(&self) -> &'static str;          // stable id, used by --only
+    fn name(&self) -> &'static str;              // stable id, used by --only
     fn codes(&self) -> &'static [&'static str];  // epubcheck message ids
     fn description(&self) -> &'static str;
-    fn apply(&self, book: &mut Book) -> Vec<String>;  // one line per change
+    fn apply(&self, book: &mut Book) -> Outcome; // changes + findings
 }
 ```
 
 1. Add the struct to a module under `src/fixers/` — `opf.rs`, `ncx.rs`,
-   `ids.rs`, `filenames.rs`, or a new file for a new area.
-2. Register it in `fixers::all()`. Fixers run in list order, so anything that
-   rewrites filenames or ids belongs before passes that read them.
-3. Add a test to `tests/fixers.rs` covering both the broken input and an
-   already-clean one.
+   `ids.rs`, `filenames.rs`, `tables.rs`, `anchors.rs`, or a new file.
+2. Register it in `fixers::all()`. Fixers run in list order, and the one
+   ordering constraint that matters is that everything touching internal links
+   runs *before* `filenames`, which renames the resources those links point at.
+3. Add a test covering both the broken input and an already-clean one —
+   `tests/fixers.rs` for packaging fixes, `tests/content.rs` for anything
+   inside a content document.
 
 `Book` gives you the pieces without any zip handling:
 
@@ -127,11 +183,27 @@ book.set_text(name, s) // replace one
 book.for_each_text(|name, text| { ... })    // every decodable entry, in order
 book.for_each_markup(|name, text| { ... })  // .html / .xhtml / .htm only
 book.rename(old, new)  // schedule a rename, applied on repack
+book.epub_version()    // 2 or 3, from the OPF - check this before assuming a rule
+book.reference_index() // what links where, for deciding if an anchor is live
 ```
 
-Two rules make the whole thing safe: a fixer must be a **no-op on input it does
-not recognise**, and it must **report only changes it actually made** — the
-caller uses a non-empty result to decide whether to rewrite the file at all.
+For anything that depends on where an element sits in the tree, use the scanner
+rather than a regex:
+
+```rust
+use epubfix::markup::{scan, Edits};
+
+let nodes = scan(text)?;              // every tag, with parent, spans, attrs
+let mut edits = Edits::new();
+edits.delete(node.attr("valign").unwrap().span_with_space.clone());
+edits.insert(node.name_end, " id=\"x\"");
+let fixed = edits.apply(text);        // untouched bytes copied verbatim
+```
+
+Three rules make the whole thing safe: a fixer must be a **no-op on input it
+does not recognise**; it must **report only changes it actually made**, since a
+non-empty change list is what decides whether the file gets rewritten at all;
+and when it is not sure, it must **record a finding rather than guess**.
 
 ## Tests
 
@@ -140,13 +212,32 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-31 tests cover each fixer against broken and clean input, plus repacking,
-backups, dry runs, rename collisions, non-UTF-8 passthrough, and idempotency.
-The output has also been checked end to end against EPUBCheck 5.2.1: a book
-carrying all seven defects validates clean afterwards.
+66 tests. Each fixer is checked against both broken and already-clean input,
+alongside repacking, backups, dry runs, rename collisions, non-UTF-8
+passthrough, and idempotency.
+
+`tests/common/verify.rs` is a reusable structural harness that every
+content-document test runs automatically. After a repair it asserts that no
+entry vanished, no id became a duplicate, and **every internal link still
+resolves to a file that exists and an id that exists in it** — the check that
+catches a fix which silences epubcheck while quietly breaking navigation.
+`tests/verify.rs` proves those checks actually fire rather than passing
+vacuously.
+
+Verified end to end against EPUB Check 5.2.1: fixture books carrying every
+defect above validate with zero errors afterwards, as **both** EPUB 2 (9 errors
+to 0) and EPUB 3 (20 errors to 0).
 
 ## Origin
 
-A port of `epubfix.py`, matching its behaviour (including the exact sanitising
-rules) while adding rename-collision handling, staged writes, backup
-preservation, folder scanning, and the fixer registry.
+A port of `epubfix.py`, matching its behaviour on the packaging fixes (including
+the exact sanitising rules) while adding rename-collision handling, staged
+writes, backup preservation, folder scanning, and the fixer registry.
+
+Two bugs inherited from the original are fixed here. `name` was treated as a
+synonym for `id` and sanitised everywhere, which rewrote valid markup such as
+`<meta name="calibre:cover">` and would have mangled any form field with a colon
+in its name; it is now restricted to `<a>` and `<map>`, where the attribute is
+genuinely ID-like. And sanitising could rename `a:b` onto a document's existing
+`a_b`, trading one epubcheck error for a duplicate-id error; ids are now scoped
+per document and checked for collisions.
