@@ -7,10 +7,13 @@
 //! See [`fixers`] for how to add a new repair.
 
 pub mod book;
+pub mod entities;
 pub mod fixers;
 pub mod markup;
+pub mod migrate;
 pub mod refs;
 pub mod util;
+pub mod verify;
 
 use std::fmt;
 use std::fs::{self, File};
@@ -68,6 +71,12 @@ pub struct Options {
     pub backup: bool,
     /// Run only these fixers, by [`Fixer::name`]. Empty means all of them.
     pub only: Vec<String>,
+    /// Convert an EPUB 2 book to EPUB 3 before running the fixers.
+    ///
+    /// Off by default: migration changes the file's format identity, and some
+    /// older reading systems are EPUB 2 only. That is a policy choice, not
+    /// something the tool can compute.
+    pub migrate_epub3: bool,
 }
 
 impl Default for Options {
@@ -76,6 +85,7 @@ impl Default for Options {
             dry_run: false,
             backup: true,
             only: Vec::new(),
+            migrate_epub3: false,
         }
     }
 }
@@ -83,6 +93,42 @@ impl Default for Options {
 /// Run every fixer over `book`.
 pub fn fix_book(book: &mut Book) -> Outcome {
     fix_book_with(book, &fixers::all())
+}
+
+/// Convert `book` to EPUB 3, but only if the result preserves everything.
+///
+/// Runs on a clone and keeps it only when [`verify::check`] is satisfied, so a
+/// migration that would drop a link, lose an id or move text aborts and leaves
+/// the book exactly as it was. Returns the outcome either way.
+///
+/// This runs *before* the fixer registry, because the EPUB version decides what
+/// several of the fixers should do — `legacy-table-attrs` in particular strips a
+/// much larger set under HTML5 rules.
+pub fn migrate_book(book: &mut Book) -> Outcome {
+    if book.epub_version() >= 3 {
+        return Outcome::none();
+    }
+
+    let mut candidate = book.clone();
+    let mut outcome = migrate::migrate(&mut candidate);
+    if !outcome.has_changes() {
+        return outcome;
+    }
+
+    let problems = verify::check(book, &candidate);
+    if problems.is_empty() {
+        *book = candidate;
+        return outcome;
+    }
+
+    // Something would have been lost. Keep the findings, drop the changes.
+    let mut aborted = Outcome::none();
+    aborted.push_finding(format!(
+        "EPUB 3 migration was abandoned because it would not have preserved the book ({})",
+        problems.join("; ")
+    ));
+    aborted.findings.append(&mut outcome.findings);
+    aborted
 }
 
 /// Run a chosen set of fixers over `book`, in the order given.
@@ -113,7 +159,11 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
             .collect()
     };
 
-    let outcome = fix_book_with(&mut book, &selected);
+    let mut outcome = Outcome::none();
+    if opts.migrate_epub3 {
+        outcome.merge(migrate_book(&mut book));
+    }
+    outcome.merge(fix_book_with(&mut book, &selected));
     if !outcome.has_changes() || opts.dry_run {
         return Ok(outcome);
     }

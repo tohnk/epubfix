@@ -21,6 +21,7 @@ use crate::book::Book;
 pub mod anchors;
 pub mod filenames;
 pub mod ids;
+pub mod legacy_html;
 pub mod ncx;
 pub mod opf;
 pub mod tables;
@@ -106,9 +107,12 @@ pub fn all() -> Vec<Box<dyn Fixer>> {
         Box::new(opf::FontMediaType),
         Box::new(ids::XmlIds),
         Box::new(tables::LegacyTableAttrs),
+        Box::new(legacy_html::ImgAlt),
         Box::new(anchors::MisplacedAnchors),
         Box::new(filenames::UnsafeFilenames),
         Box::new(ncx::PlayOrder),
         Box::new(ncx::DtbUid),
+        // Diagnostic only, and last: it reports on what everything else left behind.
+        Box::new(legacy_html::VersionMismatch),
     ]
 }

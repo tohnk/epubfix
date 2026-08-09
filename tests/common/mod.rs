@@ -222,6 +222,30 @@ pub fn epub3(ch1_body: &str, ch2_body: &str) -> Vec<u8> {
     build(true, ch1_body, ch2_body)
 }
 
+/// An EPUB 2 book with a caller-supplied NCX, for exercising nav generation.
+pub fn epub2_ncx(ch1_body: &str, ch2_body: &str, ncx: &str) -> Vec<u8> {
+    let ch1 = chapter(ch1_body, false);
+    let ch2 = chapter(ch2_body, false);
+    let opf = opf2();
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/ch2.xhtml", ch2.as_bytes()),
+        ("OEBPS/toc.ncx", ncx.as_bytes()),
+    ])
+}
+
+/// Load, migrate, then run the fixers, exactly as `--migrate-epub3` does.
+pub fn roundtrip_migrated(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
+    let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
+    let mut outcome = epubfix::migrate_book(&mut book);
+    outcome.merge(epubfix::fix_book(&mut book));
+    let mut out = Cursor::new(Vec::new());
+    book.save(&mut out).unwrap();
+    (outcome, read_epub(&out.into_inner()))
+}
+
 fn build(v3: bool, ch1_body: &str, ch2_body: &str) -> Vec<u8> {
     let opf = if v3 { opf3() } else { opf2() };
     let ch1 = chapter(ch1_body, v3);

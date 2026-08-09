@@ -17,6 +17,7 @@ use crate::refs::ReferenceIndex;
 use crate::util::{MARKUP, TEXTUAL, ends_with_any};
 
 /// One entry of the source archive, kept verbatim.
+#[derive(Clone)]
 pub struct Entry {
     pub name: String,
     pub data: Vec<u8>,
@@ -25,6 +26,7 @@ pub struct Entry {
     pub last_modified: Option<DateTime>,
 }
 
+#[derive(Clone)]
 pub struct Book {
     entries: Vec<Entry>,
     /// Entry names in archive order, so every pass is deterministic.
@@ -180,6 +182,26 @@ impl Book {
                 f(name, t);
             }
         }
+    }
+
+    /// Add a new entry to the archive, after the existing ones.
+    ///
+    /// Used by the EPUB 3 migration to introduce a nav document; ordinary
+    /// fixers have no business creating files.
+    pub fn add_text_entry(&mut self, name: &str, text: String) {
+        if self.texts.contains_key(name) {
+            self.set_text(name, text);
+            return;
+        }
+        self.entries.push(Entry {
+            name: name.to_string(),
+            data: text.as_bytes().to_vec(),
+            is_dir: false,
+            compression: CompressionMethod::Deflated,
+            last_modified: None,
+        });
+        self.order.push(name.to_string());
+        self.texts.insert(name.to_string(), text);
     }
 
     /// Schedule `old` to be written out under a new name.

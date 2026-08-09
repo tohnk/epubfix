@@ -34,10 +34,12 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
 | `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
+| `img-alt` | RSC-005 | adds `alt=""` to decorative images in EPUB 2, and reports the rest rather than inventing captions |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
 | `filenames` | RSC-020, PKG-010 | renames resources whose filenames need URL escaping (spaces, non-ASCII, …) and updates every reference, raw or percent-encoded |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |
 | `ncx-uid` | NCX-001 | syncs `dtb:uid` to the OPF `unique-identifier`, byte for byte |
+| `version-mismatch` | RSC-005 | reports an EPUB 2 book whose markup only validates as EPUB 3 — diagnostic only, never rewrites |
 
 `epubfix --list` prints the same table.
 
@@ -66,6 +68,60 @@ the nearest legal element (the following row, else the preceding one, else the
 table), which is valid under both rulesets and keeps the link landing in the
 same place.
 
+## Migrating EPUB 2 to EPUB 3
+
+Some books declare EPUB 2 but carry markup that only validates as HTML5 — most
+often verse set in `<blockquote>`, which XHTML 1.1 requires to hold block-level
+children while HTML5 accepts flow content. One real book reported **28,874
+errors as EPUB 2 and 728 as EPUB 3**, from byte-identical markup. Repairing it
+to satisfy XHTML 1.1 would mean wrapping ~13,500 inline runs in `<div>`s across
+394 files, to work around one wrong attribute in the package document.
+
+`version-mismatch` detects this and says so. `--migrate-epub3` is how you act on
+it. Everything EPUB 3 additionally requires is derived from the file itself:
+
+| Requirement | Where it comes from |
+| --- | --- |
+| `<package version="3.0">` | attribute edit |
+| `<!DOCTYPE html>` in content documents | replaces the XHTML 1.1 DOCTYPE |
+| named entities rewritten as numeric | XHTML 1.1's DTD declared them; HTML5's declares none |
+| one `dcterms:modified` | generated, and only when absent |
+| one manifest item with `properties="nav"` | a nav document built from the NCX |
+| `opf:role` / `opf:file-as` / `opf:scheme` | rewritten as `<meta refines>` |
+| `properties="svg\|scripted\|mathml\|remote-resources"` | scanned from each document |
+
+The NCX becomes a real nav document: `navMap` nesting turns into nested `<ol>`,
+`pageList` into `<nav epub:type="page-list">`, and every `href` is rebased to
+the nav document's directory. The NCX itself stays in the manifest, since EPUB 3
+still permits it and EPUB 2 readers fall back to it.
+
+Two of those rows are not in any specification I was given — they came from
+running EPUB Check against a migrated book. The entity one is **fatal**:
+`<!DOCTYPE html>` declares no named entities, so a single unconverted `&mdash;`
+stops the parse dead.
+
+### Why this is safe to automate
+
+Whether the EPUB 2 declaration was the mistake or the markup was is not
+decidable, and does not need to be. Migration runs against a **clone** of the
+book and is kept only if it preserved everything: no entry dropped, no id lost
+or duplicated, no visible text changed, and every internal link still resolving.
+If any of that fails the migration is abandoned and the book is left untouched.
+Gating on the outcome sidesteps the unanswerable question.
+
+It runs **before** every other fix, because the version decides what those fixes
+should do — `legacy-table-attrs` strips a much larger set under HTML5 rules, and
+`img-alt` stops applying at all.
+
+It is **off by default**. Migration changes the file's format identity, and some
+older reading systems are EPUB 2 only. That is a policy choice, not something
+the tool can compute.
+
+```sh
+epubfix --dry-run -r ~/Books        # which books would migration help?
+epubfix --migrate-epub3 book.epub   # then act on it
+```
+
 ## Usage
 
 ```
@@ -74,6 +130,7 @@ epubfix [OPTIONS] [FILE_OR_DIR ...]
 -n, --dry-run       report what would change; write nothing
     --no-backup     do not keep a .bak copy of the original
 -r, --recursive     descend into subdirectories when scanning a folder
+    --migrate-epub3 convert EPUB 2 books to EPUB 3 first
     --only NAMES    run only these fixers (comma-separated, see --list)
 -l, --list          list the available fixers and exit
     --pause         wait for Enter before exiting
@@ -224,15 +281,21 @@ catches a fix which silences epubcheck while quietly breaking navigation.
 `tests/verify.rs` proves those checks actually fire rather than passing
 vacuously.
 
-Verified end to end against EPUB Check 5.2.1: fixture books carrying every
+Verified end to end against EPUB Check 5.2.1. Fixture books carrying every
 defect above validate with zero errors afterwards, as **both** EPUB 2 (9 errors
-to 0) and EPUB 3 (20 errors to 0).
+to 0) and EPUB 3 (20 errors to 0); a Coleridge-shaped EPUB 2 book with verse in
+`<blockquote>`, legacy `opf:` metadata, a nested NCX with a `pageList` and
+uncaptioned images goes from 24 errors to 0 under `--migrate-epub3`.
 
 ## Origin
 
 A port of `epubfix.py`, matching its behaviour on the packaging fixes (including
 the exact sanitising rules) while adding rename-collision handling, staged
 writes, backup preservation, folder scanning, and the fixer registry.
+
+It has since grown past that scope: it handles EPUB 3 as well as EPUB 2, repairs
+content documents rather than only packaging metadata, and can migrate a book
+between the two.
 
 Two bugs inherited from the original are fixed here. `name` was treated as a
 synonym for `id` and sanitised everywhere, which rewrote valid markup such as

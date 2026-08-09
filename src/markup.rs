@@ -33,6 +33,9 @@ pub enum NodeKind {
     Empty,
     /// `</td>`
     End,
+    /// A DOCTYPE, comment or processing instruction. Recorded so that callers
+    /// can tell it apart from text; never an element, never a parent.
+    Other,
 }
 
 /// One attribute, with the byte ranges needed to edit it in place.
@@ -184,6 +187,23 @@ pub fn scan(src: &str) -> Result<Vec<Node>, ScanError> {
                     name_end,
                     attrs: Vec::new(),
                     parent,
+                    close: None,
+                    has_text: false,
+                });
+            }
+            Event::DocType(_) | Event::Comment(_) | Event::PI(_) | Event::Decl(_) => {
+                nodes.push(Node {
+                    kind: NodeKind::Other,
+                    name: match event {
+                        Event::DocType(_) => "#doctype".into(),
+                        Event::Comment(_) => "#comment".into(),
+                        Event::Decl(_) => "#xml".into(),
+                        _ => "#pi".into(),
+                    },
+                    span: start..end,
+                    name_end: start,
+                    attrs: Vec::new(),
+                    parent: open.last().copied(),
                     close: None,
                     has_text: false,
                 });
@@ -378,7 +398,7 @@ mod tests {
         let nodes = scan(DOC).expect("should parse");
         let names: Vec<&str> = nodes
             .iter()
-            .filter(|n| n.kind != NodeKind::End)
+            .filter(|n| matches!(n.kind, NodeKind::Start | NodeKind::Empty))
             .map(|n| n.name.as_str())
             .collect();
         assert_eq!(
@@ -390,13 +410,28 @@ mod tests {
     }
 
     #[test]
+    fn non_element_markup_is_recorded_rather_than_read_as_text() {
+        // The declaration and DOCTYPE must be distinguishable from text, or
+        // rewriting a DOCTYPE looks like the prose changed.
+        let nodes = scan(DOC).unwrap();
+        let others: Vec<&str> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(others, vec!["#xml", "#doctype"]);
+    }
+
+    #[test]
     fn tag_spans_point_at_the_original_bytes() {
         let nodes = scan(DOC).unwrap();
         for n in &nodes {
             let raw = &DOC[n.span.clone()];
             assert!(raw.starts_with('<'), "{raw:?}");
             assert!(raw.ends_with('>'), "{raw:?}");
-            assert!(raw.contains(&n.name) || n.name == "br", "{raw:?}");
+            if n.kind != NodeKind::Other {
+                assert!(raw.contains(&n.name) || n.name == "br", "{raw:?}");
+            }
         }
     }
 

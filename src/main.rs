@@ -24,6 +24,7 @@ OPTIONS:
     -n, --dry-run       report what would change; write nothing
         --no-backup     do not keep a .bak copy of the original
     -r, --recursive     descend into subdirectories when scanning a folder
+        --migrate-epub3 convert EPUB 2 books to EPUB 3 first (see below)
         --only NAMES    run only these fixers (comma-separated, see --list)
     -l, --list          list the available fixers and exit
         --pause         wait for Enter before exiting
@@ -37,6 +38,18 @@ exists — a second run never overwrites the pristine original.
 Anything a fixer recognises as wrong but will not repair on its own is listed
 under \"needs manual attention\" instead of being guessed at. Use --dry-run to
 triage a whole library without writing to it.
+
+MIGRATION:
+    Some books declare EPUB 2 but carry markup that only validates as HTML5 -
+    typically verse in <blockquote>, which XHTML 1.1 will not accept. Repairing
+    the markup can mean thousands of edits; --migrate-epub3 flips the book to
+    EPUB 3 instead, generating the nav document, metadata and manifest
+    properties EPUB 3 requires. It runs before every other fix, since the
+    version decides what those fixes should do.
+
+    It is off by default because it changes the file's format identity, and
+    some older reading systems are EPUB 2 only. A migration that would lose a
+    link, an id or any visible text is abandoned and the book left alone.
 
 EXIT STATUS:
     0  all good
@@ -71,6 +84,7 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
             "-n" | "--dry-run" => parsed.opts.dry_run = true,
             "--no-backup" => parsed.opts.backup = false,
             "-r" | "--recursive" => parsed.recursive = true,
+            "--migrate-epub3" => parsed.opts.migrate_epub3 = true,
             "--pause" => parsed.pause = Some(true),
             "--no-pause" => parsed.pause = Some(false),
             "-l" | "--list" => {
