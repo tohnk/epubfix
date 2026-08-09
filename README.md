@@ -90,6 +90,10 @@ downward at all.
 | declares EPUB 3, nothing needs HTML5 | **downgraded** — one attribute, plus stripping the EPUB 3-only package constructs |
 | declares EPUB 3, content needs HTML5 | declaration kept, book repaired forward to satisfy it |
 | evidence mixed or weak | declaration kept, and the book is reported |
+| no evidence of a problem at all | nothing happens, whichever version it declares |
+
+That last row is a hard precondition, not a fallthrough. A book with no
+violations has nothing to fix, so every change is downside.
 
 Measured against EPUB Check 5.2.1, on a default run with no flags:
 
@@ -106,9 +110,21 @@ every EPUB 2 marker there is — XHTML 1.1 DOCTYPEs, bare `&mdash;`, `opf:role`,
 no nav — and is still not downgraded, because its verse only validates as HTML5.
 Downgrading would trade a handful of errors for a great many.
 
-**Decisive** (any occurrence means the book is EPUB 3): HTML5-only elements,
-`epub:` attributes, `<meta charset>`, inline SVG or MathML, a nav document,
-`<meta refines>` metadata.
+**Decisive** (any occurrence is an *error* under EPUB 2, so the book is EPUB 3
+whatever it says): elements XHTML 1.1 has no equivalent for — `section`,
+`article`, `nav`, `figure`, `video`, `math` and the rest — plus `epub:`
+attributes, `<meta charset>`, a nav document and `<meta refines>` metadata.
+
+Every element in that list was placed in an EPUB 2 book on its own and run
+through EPUB Check; only the ones that actually produced an error are in it.
+**`svg` is not**, and must never be added: inline SVG is legal in EPUB 2, since
+OPS 2.0.1 lists it among the core media types. An earlier version assumed
+otherwise and fired on five books in a row, three of which validated with zero
+errors — proposing to drag each through thousands of collateral entity and
+DOCTYPE rewrites for no benefit. The general rule that prevents a repeat:
+**trigger on violations, never on features.** "Does this book contain something
+HTML5-ish" needs a complete model of both content models; "does this book contain
+something that is an error where it stands" does not.
 
 **Suggestive** (only counts in quantity): inline content inside `<blockquote>`
 and other block-only containers. A handful of these means a few paragraphs need

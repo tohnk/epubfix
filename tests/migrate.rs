@@ -514,3 +514,61 @@ fn a_newly_broken_reference_is_caught_even_when_others_were_already_broken() {
         "the pre-existing one must not: {problems:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Triggering on violations rather than features
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_epub2_book_with_an_inline_svg_cover_is_never_retagged() {
+    // The regression that matters most here. An earlier version listed `svg`
+    // among the constructs that "require EPUB 3" and fired on five books in a
+    // row, three of which validated with zero errors. SVG is legal in EPUB 2 —
+    // OPS 2.0.1 lists it among the core media types, and EPUB Check agrees.
+    let cover = r#"<div><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10">
+      <image width="10" height="10" xlink:href="cover.png"/></svg></div>"#;
+    let before = epub2_ncx(cover, "<p>plain prose</p>", NESTED_NCX);
+    let (outcome, after) = roundtrip_full(&before);
+
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("retagged")),
+        "an SVG cover is not evidence of anything: {:?}",
+        outcome.changes
+    );
+    assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#));
+    assert!(!has(&after, "OEBPS/nav.xhtml"));
+}
+
+#[test]
+fn a_book_with_no_evidence_of_a_problem_is_left_completely_alone() {
+    // The hard precondition: no violations means nothing to fix, so every
+    // change is downside. Holds whichever version the book declares.
+    let svg = r#"<div><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg></div>"#;
+    let before = epub2(svg, "<p>prose</p>");
+    let (outcome, after) = roundtrip_full(&before);
+
+    assert!(!outcome.has_changes(), "got {:?}", outcome.changes);
+    assert_eq!(read_epub(&before), after, "byte-identical");
+}
+
+#[test]
+fn an_element_that_really_is_illegal_in_epub2_still_triggers_an_upgrade() {
+    // The trigger has to keep working for constructs that genuinely are errors.
+    // <section> has no XHTML 1.1 equivalent and EPUB Check rejects it outright.
+    let before = epub2_ncx(
+        "<section><p>modern markup</p></section>",
+        "<p>x</p>",
+        NESTED_NCX,
+    );
+    let (outcome, after) = roundtrip_full(&before);
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("retagged") && c.contains("section")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="3.0""#));
+}

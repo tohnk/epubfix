@@ -5,15 +5,32 @@
 //! the two disagree, the declaration is the thing to change — in either
 //! direction. Rewriting a book's markup to satisfy a wrong attribute is the
 //! tail wagging the dog, and for the EPUB 2 direction it is not even possible:
-//! there is no XHTML 1.1 spelling of a nav document or of inline SVG.
+//! there is no XHTML 1.1 spelling of a nav document or of a `<section>`.
 //!
 //! That needs a two-sided test, because a book can carry evidence of both. The
 //! Coleridge book does: verse in `<blockquote>` that only HTML5 accepts, *and*
 //! Kindle-era table markup. Only the first kind is decisive, because only the
 //! first kind cannot be repaired.
 //!
-//! * [`Assessment::epub3_only`] — constructs with no EPUB 2 equivalent. If any
-//!   exist the book is EPUB 3, whatever it says, and downgrading is off.
+//! * [`Assessment::epub3_only`] — constructs that are *errors* under EPUB 2. If
+//!   any exist the book is EPUB 3, whatever it says, and downgrading is off.
+//!
+//! That distinction — errors, not features — is the whole game, and getting it
+//! wrong is how this went wrong once already. An earlier version listed `svg`
+//! among the decisive constructs on the reasoning that SVG is an HTML5 thing. It
+//! is not: OPS 2.0.1 lists SVG among its core media types, and epubcheck accepts
+//! an inline `<svg>` in an EPUB 2 document without a murmur. The trigger fired on
+//! five books in a row, three of which already validated with **zero errors**,
+//! and proposed dragging each through thousands of collateral entity and DOCTYPE
+//! rewrites for no benefit at all.
+//!
+//! The lesson generalises past the one bad entry. Asking "does this book contain
+//! something HTML5-ish" requires a complete and correct model of both content
+//! models, which is the hard part. Asking "does this book contain something that
+//! is an error where it stands" does not. Every element in [`EPUB2_ILLEGAL`] was
+//! checked against EPUB Check 5.2.1 in an EPUB 2 book and observed to produce an
+//! error; `svg` was checked the same way and produced none, which is why it is
+//! absent.
 //! * [`Assessment::epub2_markers`] — signs it was authored as EPUB 2. These are
 //!   all repairable either way, so on their own they only tip the balance when
 //!   nothing needs EPUB 3.
@@ -26,8 +43,13 @@ use crate::book::Book;
 use crate::markup::{NodeKind, scan};
 use crate::util::{basename, re};
 
-/// Elements HTML5 introduced, which XHTML 1.1 has no equivalent for.
-const HTML5_ONLY: &[&str] = &[
+/// Elements whose mere presence is an error in an EPUB 2 content document.
+///
+/// Measured, not assumed: each was placed in an EPUB 2 book on its own and run
+/// through EPUB Check 5.2.1. Note what is *not* here — `svg` is legal in EPUB 2
+/// and must never appear in this list. Anything added later gets the same
+/// treatment before it goes in.
+const EPUB2_ILLEGAL: &[&str] = &[
     "article",
     "aside",
     "audio",
@@ -56,7 +78,6 @@ const HTML5_ONLY: &[&str] = &[
     "section",
     "source",
     "summary",
-    "svg",
     "template",
     "time",
     "track",
@@ -159,7 +180,8 @@ fn scan_document(text: &str, tally: &mut Tally) {
             _ => {}
         }
 
-        if HTML5_ONLY.contains(&node.name.as_str()) && !tally.html5_elements.contains(&node.name) {
+        if EPUB2_ILLEGAL.contains(&node.name.as_str()) && !tally.html5_elements.contains(&node.name)
+        {
             tally.html5_elements.push(node.name.clone());
         }
         if node.attrs.iter().any(|x| x.name.starts_with("epub:")) {
@@ -229,7 +251,7 @@ pub fn assess(book: &Book) -> Assessment {
     if !html5_elements.is_empty() {
         html5_elements.sort();
         a.epub3_only.push(format!(
-            "HTML5-only element(s): {}",
+            "element(s) that are errors under EPUB 2: {}",
             html5_elements.join(", ")
         ));
     }
@@ -275,6 +297,11 @@ pub fn assess(book: &Book) -> Assessment {
 }
 
 /// Decide whether the declared version should move to match the content.
+///
+/// Both directions require *positive evidence of a problem*. A book that shows
+/// none is left exactly as it is, whichever version it declares — there is
+/// nothing to fix, so every change is downside. That is the hard precondition
+/// the SVG mistake violated: it retagged books that already validated clean.
 pub fn decide(book: &Book, a: &Assessment) -> Retag {
     let declared = book.epub_version();
     if declared < 3 && !a.epub3_only.is_empty() {
