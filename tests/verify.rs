@@ -25,15 +25,17 @@ fn a_clean_book_passes_every_invariant_and_changes_nothing() {
 }
 
 #[test]
-fn the_harness_notices_a_broken_link() {
-    // Not a fixer bug — a hand-built book that is already broken, proving the
-    // link check actually fires rather than passing vacuously.
-    let broken = epub2(
+fn the_harness_notices_a_newly_broken_link() {
+    // The check must fire on a link that *stopped* working.
+    let good = read_epub(&epub2(
+        "<p id=\"a\">text</p>",
+        "<p><a href=\"ch1.xhtml#a\">good</a></p>",
+    ));
+    let bad = read_epub(&epub2(
         "<p id=\"a\">text</p>",
         "<p><a href=\"ch1.xhtml#nope\">bad</a></p>",
-    );
-    let files = read_epub(&broken);
-    let r = verify(&files, &files);
+    ));
+    let r = verify(&good, &bad);
     assert!(
         r.problems.iter().any(|p| p.contains("no such id exists")),
         "expected a dangling-fragment problem, got {:?}",
@@ -42,13 +44,29 @@ fn the_harness_notices_a_broken_link() {
 }
 
 #[test]
-fn the_harness_notices_a_duplicate_id() {
-    let dup = epub2("<p id=\"a\">one</p><p id=\"a\">two</p>", "<p>x</p>");
-    let files = read_epub(&dup);
-    let r = verify(&files, &files);
+fn the_harness_notices_a_newly_duplicated_id() {
+    let good = read_epub(&epub2("<p id=\"a\">one</p><p id=\"b\">two</p>", "<p>x</p>"));
+    let bad = read_epub(&epub2("<p id=\"a\">one</p><p id=\"a\">two</p>", "<p>x</p>"));
+    let r = verify(&good, &bad);
     assert!(
         r.problems.iter().any(|p| p.contains("duplicate id")),
         "expected a duplicate-id problem, got {:?}",
+        r.problems
+    );
+}
+
+#[test]
+fn the_harness_ignores_a_defect_the_book_arrived_with() {
+    // The correction that matters: an absolute gate refused nine books out of a
+    // real 37-book library over defects that were already in the input.
+    let broken = read_epub(&epub2(
+        "<p id=\"a\">text</p>",
+        "<p><a href=\"ch1.xhtml#nope\">bad</a></p>",
+    ));
+    let r = verify(&broken, &broken);
+    assert!(
+        r.problems.is_empty(),
+        "nothing got worse, so nothing to report: {:?}",
         r.problems
     );
 }

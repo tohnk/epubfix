@@ -24,6 +24,7 @@ pub mod ids;
 pub mod legacy_html;
 pub mod ncx;
 pub mod opf;
+pub mod resources;
 pub mod tables;
 
 /// What a fixer did, and what it decided not to do.
@@ -109,6 +110,12 @@ pub fn all() -> Vec<Box<dyn Fixer>> {
         Box::new(tables::LegacyTableAttrs),
         Box::new(legacy_html::ImgAlt),
         Box::new(anchors::MisplacedAnchors),
+        Box::new(resources::DanglingResources),
+        Box::new(resources::BrokenFragments),
+        // Before the renumbering, which closes the gaps removal leaves behind.
+        Box::new(ncx::DeadNavEntries),
+        Box::new(ncx::NcxDuplicateIds),
+        Box::new(ncx::PageListAttrs),
         Box::new(filenames::UnsafeFilenames),
         Box::new(ncx::PlayOrder),
         Box::new(ncx::DtbUid),

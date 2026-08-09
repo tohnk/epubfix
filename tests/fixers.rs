@@ -4,7 +4,7 @@ mod common;
 
 use std::io::Cursor;
 
-use common::{clean_book, entry, has, make_epub, make_text_epub, names, roundtrip, with};
+use common::{clean_book, entry, has, make_epub, make_text_epub, names, plus, roundtrip, with};
 use epubfix::Book;
 
 #[test]
@@ -215,7 +215,16 @@ fn play_order_is_renumbered_from_one() {
     <navPoint id="np3" playOrder="7"><content src="ch3.xhtml"/></navPoint>
   </navMap>
 </ncx>"#;
-    let (changes, out) = roundtrip(&make_text_epub(&with(clean_book(), "OEBPS/toc.ncx", ncx)));
+    let files = plus(
+        plus(
+            with(clean_book(), "OEBPS/toc.ncx", ncx),
+            "OEBPS/ch2.xhtml",
+            common::CLEAN_CH1,
+        ),
+        "OEBPS/ch3.xhtml",
+        common::CLEAN_CH1,
+    );
+    let (changes, out) = roundtrip(&make_text_epub(&files));
 
     assert!(
         changes
@@ -239,7 +248,12 @@ fn nav_points_sharing_a_target_share_a_play_order() {
     <navPoint id="c" playOrder="3"><content src="ch2.xhtml"/></navPoint>
   </navMap>
 </ncx>"#;
-    let (changes, out) = roundtrip(&make_text_epub(&with(clean_book(), "OEBPS/toc.ncx", ncx)));
+    let files = plus(
+        with(clean_book(), "OEBPS/toc.ncx", ncx),
+        "OEBPS/ch2.xhtml",
+        common::CLEAN_CH1,
+    );
+    let (changes, out) = roundtrip(&make_text_epub(&files));
 
     assert!(
         changes

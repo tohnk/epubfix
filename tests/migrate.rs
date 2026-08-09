@@ -453,10 +453,16 @@ fn a_book_that_arrives_broken_is_still_retagged() {
         outcome.findings
     );
 
-    // And the defects it arrived with are still there, untouched and unhidden.
+    // The defects it arrived with are separately handled on their own merits:
+    // the dead stylesheet include goes, and the fragment that resolves nowhere
+    // is reported rather than guessed at. Neither has any bearing on the gate.
     let ch1 = entry(&after, "OEBPS/ch1.xhtml");
-    assert!(ch1.contains("page-template.xpgt"));
-    assert!(ch1.contains(r##"href="#nowhere""##));
+    assert!(!ch1.contains("page-template.xpgt"), "{ch1}");
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("#nowhere")),
+        "got {:?}",
+        outcome.findings
+    );
 }
 
 #[test]

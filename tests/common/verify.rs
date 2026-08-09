@@ -5,7 +5,7 @@
 //! quietly breaking navigation. `tests/verify.rs` proves the checks themselves
 //! fire; every other test file calls [`verify`] on its own fixtures.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use epubfix::markup::{NodeKind, id_attrs, scan};
 use epubfix::refs::resolve_href;
@@ -98,7 +98,64 @@ pub fn visible_text(src: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Every defect an archive has on its own terms, as comparable strings.
+///
+/// Not an assertion of correctness: real books arrive with dangling stylesheet
+/// links and fragments that never resolved. The point is to subtract one set
+/// from another, so the harness asks whether the run made anything *worse*
+/// rather than whether the result is perfect.
+fn defects(files: &Archive) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let names: HashSet<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+
+    for (name, _) in files.iter().filter(|(n, _)| is_markup(n)) {
+        let Some(src) = text_of(files, name) else {
+            continue;
+        };
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for id in ids(&src) {
+            *seen.entry(id).or_default() += 1;
+        }
+        for (id, count) in seen.iter().filter(|(_, c)| **c > 1) {
+            found.insert(format!("{name}: duplicate id \"{id}\" ({count} times)"));
+        }
+    }
+
+    let mut id_cache: HashMap<String, HashSet<String>> = HashMap::new();
+    for (name, _) in files.iter().filter(|(n, _)| is_linky(n)) {
+        let Some(src) = text_of(files, name) else {
+            continue;
+        };
+        for href in hrefs(&src) {
+            let Some((target, fragment)) = resolve_href(name, &href) else {
+                continue;
+            };
+            if !names.contains(target.as_str()) {
+                found.insert(format!("{name}: link to missing file \"{target}\""));
+                continue;
+            }
+            let Some(fragment) = fragment else { continue };
+            if !is_markup(&target) {
+                continue;
+            }
+            let set = id_cache.entry(target.clone()).or_insert_with(|| {
+                text_of(files, &target).map_or_else(HashSet::new, |t| ids(&t).into_iter().collect())
+            });
+            if !set.contains(&fragment) {
+                found.insert(format!(
+                    "{name}: link to \"{target}#{fragment}\" but no such id exists"
+                ));
+            }
+        }
+    }
+
+    found
+}
+
 /// Compare a book before and after a run.
+///
+/// The comparison is differential throughout: a defect the book arrived with is
+/// not this run's fault and is not its responsibility to fix.
 #[must_use]
 pub fn verify(before: &Archive, after: &Archive) -> Report {
     let mut r = Report::default();
@@ -118,60 +175,21 @@ pub fn verify(before: &Archive, after: &Archive) -> Report {
         }
     }
 
-    // Ids must survive, and must stay unique within a document.
-    for (name, _) in after.iter().filter(|(n, _)| is_markup(n)) {
-        let Some(now) = text_of(after, name) else {
+    // Deliberately no "every id survives" check here. This harness runs across
+    // the whole pipeline, and `xml-ids` renames ids for a living — a rename is
+    // not a loss. What matters is that no reference stopped resolving, and the
+    // differential check below covers exactly that.
+    for (name, _) in before.iter().filter(|(n, _)| is_markup(n)) {
+        let (Some(was), Some(now)) = (text_of(before, name), text_of(after, name)) else {
             continue;
         };
-        let after_ids = ids(&now);
-
-        let mut seen: HashMap<&str, usize> = HashMap::new();
-        for id in &after_ids {
-            *seen.entry(id.as_str()).or_default() += 1;
-        }
-        for (id, count) in seen.iter().filter(|(_, c)| **c > 1) {
-            r.problems
-                .push(format!("{name}: duplicate id \"{id}\" ({count} times)"));
-        }
-
-        if let Some(was) = text_of(before, name)
-            && visible_text(&was) != visible_text(&now)
-        {
+        if visible_text(&was) != visible_text(&now) {
             r.text_changed.push(name.clone());
         }
     }
 
-    // Every internal link must still land on something.
-    let names: HashSet<&str> = after.iter().map(|(n, _)| n.as_str()).collect();
-    let mut id_cache: HashMap<String, HashSet<String>> = HashMap::new();
-    for (name, _) in after.iter().filter(|(n, _)| is_linky(n)) {
-        let Some(src) = text_of(after, name) else {
-            continue;
-        };
-        for href in hrefs(&src) {
-            let Some((target, fragment)) = resolve_href(name, &href) else {
-                continue;
-            };
-            if !names.contains(target.as_str()) {
-                r.problems.push(format!(
-                    "{name}: link to missing file \"{target}\" ({href})"
-                ));
-                continue;
-            }
-            let Some(fragment) = fragment else { continue };
-            if !is_markup(&target) {
-                continue;
-            }
-            let set = id_cache.entry(target.clone()).or_insert_with(|| {
-                text_of(after, &target).map_or_else(HashSet::new, |t| ids(&t).into_iter().collect())
-            });
-            if !set.contains(&fragment) {
-                r.problems.push(format!(
-                    "{name}: link to \"{target}#{fragment}\" but no such id exists"
-                ));
-            }
-        }
-    }
+    r.problems
+        .extend(defects(after).difference(&defects(before)).cloned());
 
     r
 }

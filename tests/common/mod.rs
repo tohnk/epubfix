@@ -132,6 +132,17 @@ pub fn clean_book() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// Add an entry to a book description.
+pub fn plus(
+    files: Vec<(&'static str, &'static str)>,
+    name: &'static str,
+    text: &'static str,
+) -> Vec<(&'static str, &'static str)> {
+    let mut out = files;
+    out.push((name, text));
+    out
+}
+
 /// Replace the contents of one entry in a book description.
 pub fn with(
     files: Vec<(&'static str, &'static str)>,

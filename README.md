@@ -36,6 +36,11 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
 | `img-alt` | RSC-005 | adds `alt=""` to decorative images in EPUB 2, and reports the rest rather than inventing captions |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
+| `dangling-resources` | RSC-007 | repoints references whose file moved, and drops dead stylesheet/script includes — never an `<img>` or `<a>` |
+| `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
+| `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
+| `ncx-duplicate-ids` | RSC-005 | makes duplicated NCX ids unique, leaving any that are referenced alone |
+| `ncx-pagelist-attrs` | RSC-005 | gives `<pageList>` both of the attributes its DTD requires, or neither |
 | `filenames` | RSC-020, PKG-010 | renames resources whose filenames need URL escaping (spaces, non-ASCII, …) and updates every reference, raw or percent-encoded |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |
 | `ncx-uid` | NCX-001 | syncs `dtb:uid` to the OPF `unique-identifier`, byte for byte |
@@ -147,10 +152,22 @@ NCX.
 
 Whether the declaration was the mistake or the markup was is not decidable, and
 does not need to be. Every retag runs against a **clone** of the book and is
-kept only if it preserved everything: no entry dropped, no id lost or
-duplicated, no visible text changed, and every internal link still resolving. If
-any of that fails the retag is abandoned and the book left untouched. Gating on
-the outcome sidesteps the unanswerable question.
+kept only if it preserved everything. Gating on the outcome sidesteps the
+unanswerable question.
+
+**The gate is differential, not absolute** — and that distinction is not
+pedantry. An earlier version asserted that every internal reference in the
+result resolves, which sounds right and is wrong: it refused nine books out of a
+real 37-book library, every one of them over a defect already present in the
+input — a `<link>` to a `page-template.xpgt` Calibre had dropped, a Kobo
+`<script>` with no file behind it, fragments pointing at ids that never existed.
+None of it had anything to do with the operation being gated, and refusing on
+that basis turns away exactly the books that most need help.
+
+So the question is never "is the result perfect" but "did this make anything
+worse": no entry dropped, no id lost or *newly* duplicated, no visible text
+changed, and no reference that used to resolve that stopped. A book is not
+required to arrive undamaged to be helped.
 
 Retagging runs **before** every other fix, because the version decides what
 those fixes should do — `legacy-table-attrs` strips a much larger set under
@@ -321,12 +338,19 @@ alongside repacking, backups, dry runs, rename collisions, non-UTF-8
 passthrough, and idempotency.
 
 `tests/common/verify.rs` is a reusable structural harness that every
-content-document test runs automatically. After a repair it asserts that no
-entry vanished, no id became a duplicate, and **every internal link still
-resolves to a file that exists and an id that exists in it** — the check that
-catches a fix which silences epubcheck while quietly breaking navigation.
-`tests/verify.rs` proves those checks actually fire rather than passing
-vacuously.
+content-document test runs automatically. It is differential in the same way the
+library gate is: after a repair it asserts that no entry vanished, no id became
+*newly* duplicated, no visible text changed, and no reference that used to
+resolve stopped resolving — the check that catches a fix which silences
+epubcheck while quietly breaking navigation. `tests/verify.rs` proves those
+checks fire on a real regression and stay quiet on a pre-existing defect.
+
+Two rules learned the hard way and worth stating: **when a schema requires a set
+of attributes, supply the whole set or none** — adding only `class` to a
+`<pageList>` pushed one book onto the strict validation path and introduced an
+error epubcheck had not been reporting. And **verify by re-running epubcheck,
+not by reasoning about the fix**: the error count must strictly decrease and no
+new error *code* may appear.
 
 Verified end to end against EPUB Check 5.2.1. Fixture books carrying every
 defect above validate with zero errors afterwards, as **both** EPUB 2 (9 errors
