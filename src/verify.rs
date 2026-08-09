@@ -8,7 +8,7 @@
 //! which is undecidable — into "did the result preserve everything?", which is
 //! not.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -96,53 +96,34 @@ fn is_linky(name: &str) -> bool {
     ends_with_any(name, &[".xhtml", ".html", ".htm", ".ncx", ".opf"])
 }
 
-/// Compare a book against a transformed copy of itself.
+/// Every defect a book has on its own terms, as comparable strings.
 ///
-/// An empty result means the transformation preserved everything that matters:
-/// no entry vanished, no id was lost or duplicated, no visible text changed, and
-/// every internal link still lands on something.
-pub fn check(before: &Book, after: &Book) -> Vec<String> {
-    let mut problems = Vec::new();
-    let present: HashSet<&str> = after.names().iter().map(String::as_str).collect();
+/// Deliberately *not* an assertion of correctness — plenty of real books are
+/// already missing a stylesheet or pointing at an anchor that was never there.
+/// The point is to be able to subtract one set from another.
+fn defects(book: &Book) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let present: HashSet<&str> = book.names().iter().map(String::as_str).collect();
 
-    for name in before.names() {
-        if !present.contains(name.as_str()) {
-            problems.push(format!("entry disappeared: {name}"));
-        }
-    }
-
-    // Ids must survive, stay unique, and the words must not move.
-    for name in before.markup_names() {
-        let (Some(was), Some(now)) = (before.text(&name), after.text(&name)) else {
+    for name in book.markup_names() {
+        let Some(text) = book.text(&name) else {
             continue;
         };
-        let after_ids = ids(now);
-        let mut seen: HashMap<&str, usize> = HashMap::new();
-        for id in &after_ids {
-            *seen.entry(id.as_str()).or_default() += 1;
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for id in ids(text) {
+            *seen.entry(id).or_default() += 1;
         }
         for (id, n) in seen.iter().filter(|(_, n)| **n > 1) {
-            problems.push(format!("{name}: duplicate id \"{id}\" ({n} times)"));
-        }
-        for id in ids(was) {
-            if !after_ids.contains(&id) {
-                problems.push(format!("{name}: id \"{id}\" was lost"));
-            }
-        }
-        if visible_text(was) != visible_text(now) {
-            problems.push(format!("{name}: visible text changed"));
+            found.insert(format!("{name}: duplicate id \"{id}\" ({n} times)"));
         }
     }
 
-    // Every internal link must still land on something.
     let mut id_cache: HashMap<String, HashSet<String>> = HashMap::new();
-    for name in after.names() {
+    for name in book.names() {
         if !is_linky(name) {
             continue;
         }
-        let Some(src) = after.text(name) else {
-            continue;
-        };
+        let Some(src) = book.text(name) else { continue };
         let Ok(nodes) = scan(src) else { continue };
         for attr in nodes
             .iter()
@@ -153,27 +134,70 @@ pub fn check(before: &Book, after: &Book) -> Vec<String> {
                 continue;
             };
             if !present.contains(target.as_str()) {
-                problems.push(format!(
-                    "{name}: link to missing file \"{target}\" ({})",
-                    attr.value
-                ));
+                found.insert(format!("{name}: link to missing file \"{target}\""));
                 continue;
             }
             let (Some(fragment), true) = (fragment, ends_with_any(&target, MARKUP)) else {
                 continue;
             };
             let set = id_cache.entry(target.clone()).or_insert_with(|| {
-                after
-                    .text(&target)
+                book.text(&target)
                     .map_or_else(HashSet::new, |t| ids(t).into_iter().collect())
             });
             if !set.contains(&fragment) {
-                problems.push(format!(
+                found.insert(format!(
                     "{name}: link to \"{target}#{fragment}\" but no such id exists"
                 ));
             }
         }
     }
+
+    found
+}
+
+/// Compare a book against a transformed copy of itself.
+///
+/// **The gate is differential, not absolute.** An earlier version asserted that
+/// every internal reference resolves, which sounds right and is wrong: it
+/// refused nine books out of a real 37-book library, every one of them for a
+/// defect that was already in the input — a `<link>` to a `page-template.xpgt`
+/// Calibre had dropped, a Kobo `<script>` with no file behind it, fragments
+/// pointing at ids that never existed. None of it had anything to do with the
+/// operation being gated, and refusing on that basis turns away exactly the
+/// books that most need help.
+///
+/// So the question is not "is the result perfect" but "did this make anything
+/// worse". An empty result means it did not: no entry vanished, no id was lost
+/// or newly duplicated, no visible text changed, and no reference that used to
+/// resolve stopped resolving.
+pub fn check(before: &Book, after: &Book) -> Vec<String> {
+    let mut problems = Vec::new();
+    let present: HashSet<&str> = after.names().iter().map(String::as_str).collect();
+
+    for name in before.names() {
+        if !present.contains(name.as_str()) {
+            problems.push(format!("entry disappeared: {name}"));
+        }
+    }
+
+    for name in before.markup_names() {
+        let (Some(was), Some(now)) = (before.text(&name), after.text(&name)) else {
+            continue;
+        };
+        let after_ids = ids(now);
+        for id in ids(was) {
+            if !after_ids.contains(&id) {
+                problems.push(format!("{name}: id \"{id}\" was lost"));
+            }
+        }
+        if visible_text(was) != visible_text(now) {
+            problems.push(format!("{name}: visible text changed"));
+        }
+    }
+
+    // Anything newly broken. Defects the book arrived with are not this
+    // operation's fault and are not its responsibility to fix.
+    problems.extend(defects(after).difference(&defects(before)).cloned());
 
     problems
 }

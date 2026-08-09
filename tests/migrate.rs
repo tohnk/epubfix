@@ -427,3 +427,84 @@ fn img_alt_does_nothing_in_epub3_where_it_is_not_an_error() {
     assert!(!outcome.has_changes(), "got {:?}", outcome.changes);
     assert_eq!(read_epub(&before), after, "bytes must be identical");
 }
+
+// ---------------------------------------------------------------------------
+// The preservation gate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_book_that_arrives_broken_is_still_retagged() {
+    // The regression that matters most here. An absolute gate — "every internal
+    // reference must resolve" — refused nine books out of a real 37-book
+    // library, every one for a defect already present in the input. The gate
+    // asks whether the operation made anything *worse*, not whether the result
+    // is perfect.
+    let before = common::epub3_written_as_epub2_but_already_broken();
+    let (outcome, after) = roundtrip_full(&before);
+
+    assert!(
+        entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#),
+        "the pre-existing defects must not block the retag: {:?}",
+        outcome.findings
+    );
+    assert!(
+        !outcome.findings.iter().any(|f| f.contains("abandoned")),
+        "got {:?}",
+        outcome.findings
+    );
+
+    // And the defects it arrived with are still there, untouched and unhidden.
+    let ch1 = entry(&after, "OEBPS/ch1.xhtml");
+    assert!(ch1.contains("page-template.xpgt"));
+    assert!(ch1.contains(r##"href="#nowhere""##));
+}
+
+#[test]
+fn the_gate_still_stops_an_operation_that_would_break_something() {
+    // The differential gate must not have become a no-op: a transformation that
+    // drops a document is still refused.
+    use epubfix::Book;
+    use std::io::Cursor;
+
+    let before = Book::load(Cursor::new(epub2("<p id=\"a\">x</p>", "<p>y</p>"))).unwrap();
+    let mut after = before.clone();
+    after.set_text("OEBPS/ch1.xhtml", "<html><body></body></html>".to_string());
+
+    let problems = epubfix::verify::check(&before, &after);
+    assert!(
+        problems.iter().any(|p| p.contains("was lost")),
+        "losing an id must still be caught: {problems:?}"
+    );
+    assert!(
+        problems.iter().any(|p| p.contains("visible text changed")),
+        "losing text must still be caught: {problems:?}"
+    );
+}
+
+#[test]
+fn a_newly_broken_reference_is_caught_even_when_others_were_already_broken() {
+    use epubfix::Book;
+    use std::io::Cursor;
+
+    let before = Book::load(Cursor::new(
+        common::epub3_written_as_epub2_but_already_broken(),
+    ))
+    .unwrap();
+    let mut after = before.clone();
+    // Break something that used to work, on top of what was already broken.
+    let text = after
+        .text("OEBPS/toc.ncx")
+        .unwrap()
+        .replace("ch1.xhtml", "gone.xhtml");
+    after.set_text("OEBPS/toc.ncx", text);
+
+    let problems = epubfix::verify::check(&before, &after);
+    assert!(
+        problems.iter().any(|p| p.contains("gone.xhtml")),
+        "the new breakage must surface: {problems:?}"
+    );
+    assert!(
+        !problems.iter().any(|p| p.contains("page-template")),
+        "the pre-existing one must not: {problems:?}"
+    );
+}

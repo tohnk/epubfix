@@ -310,3 +310,37 @@ pub fn epub3_written_as_epub2(ch1_body: &str) -> Vec<u8> {
         ("OEBPS/toc.ncx", CLEAN_NCX.as_bytes()),
     ])
 }
+
+/// A book that arrives already broken: EPUB 2-shaped content declared EPUB 3
+/// (so it wants retagging), carrying a dangling stylesheet link, a dangling
+/// fragment and a duplicate id — none of which the retag causes or cures.
+pub fn epub3_written_as_epub2_but_already_broken() -> Vec<u8> {
+    let opf = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:identifier id="BookId" opf:scheme="UUID">urn:uuid:1234-5678</dc:identifier>
+    <dc:title>Test</dc:title><dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
+</package>"#;
+    let ch1 = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \
+         \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+         <head><title>T</title>\
+         <link rel=\"stylesheet\" type=\"text/css\" href=\"../styles/page-template.xpgt\"/>\
+         </head>\n<body>\n\
+         <p id=\"dup\">one</p><p id=\"dup\">two</p>\n\
+         <p><a href=\"#nowhere\">dangling</a></p>\n\
+         </body></html>";
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/toc.ncx", CLEAN_NCX.as_bytes()),
+    ])
+}
