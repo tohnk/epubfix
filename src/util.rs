@@ -12,10 +12,19 @@ pub const TEXTUAL: &[&str] = &[
 /// Extensions treated as content documents (where `id`/`name` live).
 pub const MARKUP: &[&str] = &[".html", ".xhtml", ".htm"];
 
-/// Characters that are illegal in an XML Name and unwise in a URL path.
-pub static BAD_CHARS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^A-Za-z0-9_.\-]").unwrap());
-
-static UNDERSCORE_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"_+").unwrap());
+/// Characters that are illegal in an XML Name.
+///
+/// This is deliberately stricter than the XML specification, which allows a
+/// wide swathe of Unicode: an id only has to be unique and stable, so ASCII
+/// costs nothing and avoids every normalisation question at once.
+///
+/// It used to do double duty as the "unsafe filename" class too, which was a
+/// mistake worth naming. A URL path segment permits far more than an XML Name
+/// does — `!$&'()*+,;=` are all legal unencoded, and non-ASCII is fine — so
+/// borrowing this class for filenames condemned hundreds of files per book for
+/// nothing. Filename safety now lives in `fixers::filenames`, measured against
+/// its own rules.
+static NOT_NAME_CHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^A-Za-z0-9_.\-]").unwrap());
 
 /// Compile a regex that is known-good at author time.
 ///
@@ -40,33 +49,15 @@ pub fn valid_start(v: &str) -> bool {
 
 /// True if `v` would be rejected as an XML Name.
 pub fn is_bad_id(v: &str) -> bool {
-    !v.is_empty() && (!valid_start(v) || BAD_CHARS.is_match(v))
+    !v.is_empty() && (!valid_start(v) || NOT_NAME_CHAR.is_match(v))
 }
 
 pub fn sanitise_id(v: &str) -> String {
-    let new = BAD_CHARS.replace_all(v, "_").into_owned();
+    let new = NOT_NAME_CHAR.replace_all(v, "_").into_owned();
     if valid_start(&new) {
         new
     } else {
         format!("id_{new}")
-    }
-}
-
-/// Rewrite one path component so it is safe in a URL and free of spaces.
-pub fn safe_filename(base: &str) -> String {
-    // Mirrors Python's rpartition('.'): a leading dot is part of the stem.
-    let (stem, ext) = match base.rfind('.') {
-        Some(i) if i > 0 => (&base[..i], &base[i + 1..]),
-        _ => (base, ""),
-    };
-    let s = BAD_CHARS.replace_all(stem, "_");
-    let s = UNDERSCORE_RUN.replace_all(&s, "_");
-    let s = s.trim_matches('_');
-    let s = if s.is_empty() { "file" } else { s };
-    if ext.is_empty() {
-        s.to_string()
-    } else {
-        format!("{s}.{ext}")
     }
 }
 
@@ -89,20 +80,6 @@ pub fn dirname(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn safe_filename_matches_python_rpartition() {
-        assert_eq!(safe_filename("cover image.jpg"), "cover_image.jpg");
-        assert_eq!(safe_filename("a  b   c.png"), "a_b_c.png");
-        assert_eq!(safe_filename("chapter.one.xhtml"), "chapter.one.xhtml");
-        assert_eq!(safe_filename("no-extension"), "no-extension");
-        assert_eq!(safe_filename(".hidden"), ".hidden");
-        assert_eq!(safe_filename("!!!.css"), "file.css");
-        assert_eq!(safe_filename("_leading_.svg"), "leading.svg");
-        // Each non-ASCII char becomes one underscore, then runs collapse and the
-        // ends are trimmed — same as the Python original.
-        assert_eq!(safe_filename("Ünïcödé.ttf"), "n_c_d.ttf");
-    }
 
     #[test]
     fn ids_are_sanitised_to_valid_xml_names() {

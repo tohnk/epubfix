@@ -40,8 +40,8 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-duplicate-ids` | RSC-005 | makes duplicated NCX ids unique, leaving any that are referenced alone |
-| `ncx-pagelist-attrs` | RSC-005 | gives `<pageList>` both of the attributes its DTD requires, or neither |
-| `filenames` | RSC-020, PKG-010 | renames resources whose filenames need URL escaping (spaces, non-ASCII, …) and updates every reference, raw or percent-encoded |
+| `ncx-pagelist-attrs` | RSC-005 | completes the co-required `id`/`class` pair on a `<pageList>` that carries only one |
+| `filenames` | PKG-009, PKG-010, RSC-020 | renames resources whose filenames a URL cannot address, and updates every reference, raw or percent-encoded |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |
 | `ncx-uid` | NCX-001 | syncs `dtb:uid` to the OPF `unique-identifier`, byte for byte |
 | `version-mismatch` | RSC-005 | reports markup that does not match the declared version, where the evidence is too weak to retag on — diagnostic only |
@@ -361,12 +361,25 @@ resolve stopped resolving — the check that catches a fix which silences
 epubcheck while quietly breaking navigation. `tests/verify.rs` proves those
 checks fire on a real regression and stay quiet on a pre-existing defect.
 
-Two rules learned the hard way and worth stating: **when a schema requires a set
-of attributes, supply the whole set or none** — adding only `class` to a
-`<pageList>` pushed one book onto the strict validation path and introduced an
-error epubcheck had not been reporting. And **verify by re-running epubcheck,
-not by reasoning about the fix**: the error count must strictly decrease and no
-new error *code* may appear.
+One rule, learned the hard way and then learned again: **fire on an observed
+error, never on an inferred condition.** Every false positive this tool has had
+came from the same move — deciding a book needed repairing because something in
+it *looked* like it belonged to the other EPUB version, or was missing something
+a schema mentions somewhere.
+
+| what it fired on | what epubcheck actually says |
+| --- | --- |
+| inline `<svg>` means HTML5 | SVG is an OPS 2.0.1 core media type; silent in EPUB 2 |
+| `[^A-Za-z0-9_.-]` in a filename is unsafe | only `" * : < > ? \ \|`, controls (PKG-009) and spaces (PKG-010); `!$&'()*+,;=@~` and all non-ASCII are fine |
+| `<pageList>` missing `id` or `class` | the two are *co-required*: neither is clean, both is clean, exactly one is the error |
+| any absolute-URL `href` is a remote resource | hyperlinks are not; only embedding contexts (`img@src`, `object@data`, …) count |
+
+The first cost five books' worth of pointless entity rewriting, the second 321
+renames in a single book, and the fourth actually *introduced* two OPF-018
+warnings into a package that had none. Each was caught only by running epubcheck
+against the book and finding it had nothing to say — which is the rule's
+corollary: **verify by re-running epubcheck, not by reasoning about the fix.**
+The error count must strictly decrease and no new error *code* may appear.
 
 Verified end to end against EPUB Check 5.2.1. Fixture books carrying every
 defect above validate with zero errors afterwards, as **both** EPUB 2 (9 errors
@@ -374,6 +387,12 @@ to 0) and EPUB 3 (20 errors to 0); a Coleridge-shaped EPUB 2 book with verse in
 `<blockquote>`, legacy `opf:` metadata, a nested NCX with a `pageList` and
 uncaptioned images goes from 24 errors to 0, and a book declaring EPUB 3 while written as EPUB 2
 goes from 1 fatal + 11 errors to 0 by being retagged downward.
+
+In the other direction, a book carrying every shape that used to trigger a false
+positive — six filenames with apostrophes, exclamation marks, parentheses,
+accented Latin and CJK; a `<pageList>` with neither attribute; and three
+hyperlinks to the open web in every chapter — validates clean before the run,
+draws `nothing to do`, and validates clean after.
 
 ## Origin
 

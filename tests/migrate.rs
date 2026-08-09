@@ -99,6 +99,26 @@ fn enough_of_them_and_the_declaration_is_what_moves() {
     assert!(!entry(&after, "OEBPS/ch1.xhtml").contains("<div>"));
 }
 
+/// A book whose only absolute URLs are hyperlinks needs no extra properties.
+///
+/// The regression: a radio-series book with a link to each programme's page had
+/// `remote-resources` proposed for three of its manifest items, on a package
+/// that validated clean. A hyperlink is somewhere the reader may go, not
+/// something the document loads.
+#[test]
+fn hyperlinks_to_the_open_web_are_not_remote_resources() {
+    let linky = r#"<p>See <a href="https://www.bbc.co.uk/programmes/b006qykl">the programme
+    page</a> and <a href="http://example.org/notes">the notes</a>.</p>"#;
+    let (_, after) = migrate(&epub2_ncx(&format!("{VERSE}{linky}"), linky, NESTED_NCX));
+    let opf = entry(&after, "OEBPS/content.opf");
+
+    assert!(!opf.contains("remote-resources"), "{opf}");
+    // The nav document still gets its own property, so this is not just an
+    // assertion that nothing was declared at all.
+    assert!(opf.contains(r#"properties="nav""#), "{opf}");
+    assert_eq!(opf.matches("properties=").count(), 1, "{opf}");
+}
+
 #[test]
 fn migration_produces_everything_epub3_requires() {
     let (outcome, after) = migrate(&epub2_ncx(VERSE, "<p>x</p>", NESTED_NCX));

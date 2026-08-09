@@ -299,13 +299,29 @@ impl Fixer for NcxDuplicateIds {
     }
 }
 
-/// RSC-005: `<pageList>` missing the attributes its DTD requires.
+/// RSC-005: `<pageList>` carrying one of `id`/`class` but not the other.
 ///
-/// The NCX DTD requires *both* `id` and `class`. Supplying only one is worse
-/// than supplying neither: on a book whose `<pageList>` had neither, adding just
-/// `class` pushed the element onto the strict validation path and introduced an
-/// error epubcheck had not been reporting. When a schema requires a set, supply
-/// the whole set or none of it.
+/// The NCX schema makes these two co-required, which is an unusual enough rule
+/// to be worth stating precisely, because getting it half-right is what this
+/// fixer did. Measured against EPUB Check 5.2.1, all four combinations:
+///
+/// | `id` | `class` | |
+/// |---|---|---|
+/// | absent | absent | **clean** |
+/// | present | absent | `element "pageList" missing required attribute "class"` |
+/// | absent | present | `element "pageList" missing required attribute "id"` |
+/// | present | present | **clean** |
+///
+/// So the defect is *exactly one* of them, and the repair is to supply its
+/// partner. An earlier version fired whenever *either* was missing, which meant
+/// the `neither` row — the commonest shape in the wild, and a clean one — got
+/// both attributes bolted on. It proposed that on three books that validated
+/// with no errors at all.
+///
+/// The same mistake as the SVG trigger, in a different costume: acting on
+/// "this element is missing something a schema mentions" rather than on an
+/// error that exists. There is no reading of the NCX schema that makes the
+/// `neither` row invalid, and one run of epubcheck says so.
 pub struct PageListAttrs;
 
 impl Fixer for PageListAttrs {
@@ -316,7 +332,7 @@ impl Fixer for PageListAttrs {
         &["RSC-005"]
     }
     fn description(&self) -> &'static str {
-        "give <pageList> both of the attributes its DTD requires, or neither"
+        "complete the co-required id/class pair on a <pageList> that has only one"
     }
 
     fn apply(&self, book: &mut Book) -> Outcome {
@@ -330,23 +346,29 @@ impl Fixer for PageListAttrs {
             return Outcome::none();
         };
 
+        // Every id already in the file, so a supplied one cannot collide.
+        let mut taken: Vec<String> = nodes
+            .iter()
+            .filter_map(|n| n.attr("id"))
+            .map(|a| a.value.clone())
+            .collect();
+
         let mut edits = Edits::new();
         let mut fixed = 0u32;
         for node in nodes
             .iter()
             .filter(|n| n.name == "pagelist" && n.kind != NodeKind::End)
         {
-            let (has_id, has_class) = (node.attr("id").is_some(), node.attr("class").is_some());
-            if has_id && has_class {
-                continue;
-            }
-            let mut add = String::new();
-            if !has_id {
-                add.push_str(" id=\"pagelist\"");
-            }
-            if !has_class {
-                add.push_str(" class=\"pagelist\"");
-            }
+            let add = match (node.attr("id").is_some(), node.attr("class").is_some()) {
+                // Both, or neither: the schema is satisfied either way.
+                (true, true) | (false, false) => continue,
+                (true, false) => " class=\"pagelist\"".to_string(),
+                (false, true) => {
+                    let id = unique("pagelist", &taken);
+                    taken.push(id.clone());
+                    format!(" id=\"{id}\"")
+                }
+            };
             edits.insert(node.name_end, add);
             fixed += 1;
         }
@@ -356,7 +378,20 @@ impl Fixer for PageListAttrs {
         }
         book.set_text(&name, edits.apply(&text));
         Outcome::change(format!(
-            "completed the required attributes on {fixed} <pageList> element(s)"
+            "completed the id/class pair on {fixed} half-attributed <pageList> element(s)"
         ))
     }
+}
+
+/// `base`, or `base_2`, `base_3`, ... — whichever is not in `taken`.
+fn unique(base: &str, taken: &[String]) -> String {
+    let mut candidate = base.to_string();
+    // `taken` is finite, so at worst this stops one past its length.
+    for n in 2..=taken.len() + 2 {
+        if !taken.contains(&candidate) {
+            break;
+        }
+        candidate = format!("{base}_{n}");
+    }
+    candidate
 }

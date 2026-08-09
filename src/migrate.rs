@@ -382,30 +382,103 @@ fn refines_property(attr: &str) -> Option<&'static str> {
     }
 }
 
+/// Element/attribute pairs that pull a resource *into* the document.
+///
+/// This is the whole of the `remote-resources` question, and the distinction it
+/// draws is the one an earlier version missed. That version asked only whether
+/// an `href` or `src` held an absolute URL, which made every ordinary
+/// `<a href="https://...">` in the book look like a remote resource. On one
+/// clean book — a radio series with a link to its programme page in each
+/// chapter — that was three spurious property declarations on a package that
+/// needed none.
+///
+/// Measured against EPUB Check 5.2.1, one construct per book, each pointing at
+/// an off-container URL from a document declaring nothing:
+///
+/// | needs the property | silent |
+/// |---|---|
+/// | `img@src`, `audio@src`, `video@src`, `source@src`, `track@src` | `a@href` |
+/// | `iframe@src`, `embed@src`, `object@data`, `script@src` | `area@href` |
+/// | `image@href` / `image@xlink:href` (SVG), `input@src` | `link@href` |
+///
+/// A hyperlink is a place the reader may choose to go; it is not something the
+/// document loads. `<link>` to a remote stylesheet is its own error — remote
+/// stylesheets are not permitted at all — and declaring a property does not
+/// make it one, so it stays out too.
+fn embeds_remotely(element: &str, attr: &str) -> bool {
+    let attr = attr.rsplit(':').next().unwrap_or(attr);
+    match element {
+        "img" | "audio" | "video" | "source" | "track" | "iframe" | "embed" | "input"
+        | "script" => attr == "src",
+        "object" => attr == "data",
+        // SVG, where the same job is done by href or the XLink spelling of it.
+        "image" | "use" => attr == "href",
+        _ => false,
+    }
+}
+
+fn is_remote(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://") || value.starts_with("//")
+}
+
+/// True for a `<script>` the reading system will execute.
+///
+/// A `<script type="application/ld+json">` is a data block, not code, and
+/// epubcheck agrees: it asks for `scripted` on an executable script and says
+/// nothing about a JSON one.
+fn is_executable_script(node: &Node) -> bool {
+    match node.attr("type") {
+        None => true,
+        Some(t) => {
+            let t = t.value.trim().to_ascii_lowercase();
+            let t = t.split(';').next().unwrap_or(&t).trim().to_string();
+            t.is_empty()
+                || t == "module"
+                || t.ends_with("/javascript")
+                || t.ends_with("/ecmascript")
+        }
+    }
+}
+
 /// What extra manifest properties a content document needs.
+///
+/// Everything here is measured rather than reasoned about. `svg` and `mathml`
+/// want the element *inline* — an `<img src="pic.svg">` needs neither, since
+/// the SVG is a separate resource with its own manifest entry. `scripted`
+/// covers HTML forms as well as scripts, which is easy to miss from the name.
 fn document_properties(text: &str) -> Vec<&'static str> {
+    fn want(p: &'static str, props: &mut Vec<&'static str>) {
+        if !props.contains(&p) {
+            props.push(p);
+        }
+    }
+
     let Ok(nodes) = scan(text) else {
         return Vec::new();
     };
-    let mut props = Vec::new();
+    let mut props: Vec<&'static str> = Vec::new();
+
     for n in &nodes {
+        if n.kind == NodeKind::End {
+            continue;
+        }
         match n.name.as_str() {
-            "svg" if !props.contains(&"svg") => props.push("svg"),
-            "script" if !props.contains(&"scripted") => props.push("scripted"),
-            "math" if !props.contains(&"mathml") => props.push("mathml"),
+            "svg" => want("svg", &mut props),
+            "math" => want("mathml", &mut props),
+            // Measured: a bare <input> outside a form draws nothing, but a
+            // <form> does, script or no script.
+            "form" => want("scripted", &mut props),
+            "script" if is_executable_script(n) => want("scripted", &mut props),
             _ => {}
         }
-        if !props.contains(&"remote-resources")
-            && n.attrs.iter().any(|a| {
-                (a.name.ends_with("href") || a.name == "src")
-                    && (a.value.starts_with("http://")
-                        || a.value.starts_with("https://")
-                        || a.value.starts_with("//"))
-            })
+        if n.attrs
+            .iter()
+            .any(|a| embeds_remotely(&n.name, &a.name) && is_remote(&a.value))
         {
-            props.push("remote-resources");
+            want("remote-resources", &mut props);
         }
     }
+
     props.sort_unstable();
     props
 }
@@ -707,6 +780,90 @@ pub fn downgrade(book: &mut Book) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One row per construct measured against EPUB Check 5.2.1, each in its own
+    /// book with a manifest item declaring nothing.
+    #[test]
+    fn manifest_properties_match_what_epubcheck_asks_for() {
+        let doc = |body: &str| {
+            format!(
+                "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>T</title></head>\
+                 <body>{body}</body></html>"
+            )
+        };
+        let props = |body: &str| document_properties(&doc(body));
+        let r = "https://example.com/r";
+
+        // remote-resources is about embedding, not linking. The first row is
+        // the regression: a book with a link in every chapter had three
+        // properties proposed for it and needed none.
+        assert_eq!(
+            props(&format!(r#"<p><a href="{r}.html">l</a></p>"#)),
+            [""; 0]
+        );
+        assert_eq!(
+            props(&format!(
+                r#"<p><map name="m"><area shape="rect" coords="0,0,1,1" href="{r}.html"/></map></p>"#
+            )),
+            [""; 0]
+        );
+        for embed in [
+            format!(r#"<img src="{r}.jpg" alt="x"/>"#),
+            format!(r#"<audio src="{r}.mp3"/>"#),
+            format!(r#"<video><source src="{r}.mp4"/></video>"#),
+            format!(r#"<iframe src="{r}.html"/>"#),
+            format!(r#"<embed src="{r}.swf"/>"#),
+            format!(r#"<object data="{r}.swf"/>"#),
+        ] {
+            assert_eq!(
+                props(&embed),
+                ["remote-resources"],
+                "{embed} loads a remote resource"
+            );
+        }
+        // Relative references are not remote, however they are spelled.
+        assert_eq!(
+            props(r#"<p><img src="../Images/x.jpg" alt="x"/></p>"#),
+            [""; 0]
+        );
+
+        // scripted covers forms as well as scripts, but not a JSON data block.
+        assert_eq!(props("<script>var x=1;</script>"), ["scripted"]);
+        assert_eq!(
+            props(r#"<script type="text/javascript">x()</script>"#),
+            ["scripted"]
+        );
+        assert_eq!(
+            props(r#"<form action="x"><input name="q"/></form>"#),
+            ["scripted"]
+        );
+        assert_eq!(
+            props(r#"<script type="application/ld+json">{}</script>"#),
+            [""; 0]
+        );
+        assert_eq!(props(r#"<p><input type="text" name="q"/></p>"#), [""; 0]);
+
+        // svg and mathml want the element inline; a referenced .svg file has
+        // its own manifest entry and needs nothing here.
+        assert_eq!(
+            props(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#),
+            ["svg"]
+        );
+        assert_eq!(props(r#"<p><img src="pic.svg" alt="x"/></p>"#), [""; 0]);
+        assert_eq!(
+            props(r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi></math>"#),
+            ["mathml"]
+        );
+
+        // Combinations come back sorted and deduplicated.
+        assert_eq!(
+            props(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><image xlink:href="{r}.png"/></svg>
+                   <svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#
+            )),
+            ["remote-resources", "svg"]
+        );
+    }
 
     #[test]
     fn utc_now_looks_like_a_timestamp() {

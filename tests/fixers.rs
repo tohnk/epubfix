@@ -171,15 +171,16 @@ fn unsafe_filenames_are_renamed_and_references_updated() {
 
 #[test]
 fn colliding_renames_do_not_lose_an_entry() {
-    // "a b.txt" and "a-b.txt" both sanitise toward the same stem shape; two
-    // distinct originals must still end up as two distinct entries.
+    // "a b.css" and "a:b.css" both sanitise to "a_b.css", which a third entry
+    // already occupies; three distinct originals must still end up as three
+    // distinct entries.
     let epub = make_epub(&[
         ("META-INF/container.xml", common::CONTAINER.as_bytes()),
         ("OEBPS/content.opf", common::CLEAN_OPF.as_bytes()),
         ("OEBPS/toc.ncx", common::CLEAN_NCX.as_bytes()),
         ("OEBPS/ch1.xhtml", common::CLEAN_CH1.as_bytes()),
         ("OEBPS/a b.css", b"a{}"),
-        ("OEBPS/a+b.css", b"b{}"),
+        ("OEBPS/a:b.css", b"b{}"),
         ("OEBPS/a_b.css", b"c{}"),
     ]);
     let (changes, out) = roundtrip(&epub);
@@ -203,6 +204,106 @@ fn colliding_renames_do_not_lose_an_entry() {
     sorted.dedup();
     assert_eq!(sorted.len(), 3, "names must stay distinct: {css:?}");
     assert!(css.iter().any(|n| n.as_str() == "OEBPS/a_b.css"));
+}
+
+/// The 321-file regression.
+///
+/// One real book had 321 files with an apostrophe in the name and 42 with an
+/// exclamation mark, and the fixer proposed renaming every one of them —
+/// rewriting the manifest, the spine and every link in the book — to fix
+/// nothing at all. Both characters are RFC 3986 sub-delims, legal unencoded in
+/// a path segment, and epubcheck says nothing about either. Nor about the
+/// accented and CJK names it also used to mangle.
+#[test]
+fn filenames_that_epubcheck_accepts_are_left_alone() {
+    let legal = [
+        "Don't-Panic.css",
+        "hello!.css",
+        "a&b.css",
+        "a(b).css",
+        "a+b.css",
+        "a,b.css",
+        "a;b.css",
+        "a=b.css",
+        "a@b.css",
+        "a~b.css",
+        "Ünïcödé.css",
+        "中文.css",
+    ];
+
+    let mut entries: Vec<(String, Vec<u8>)> = vec![
+        (
+            "META-INF/container.xml".into(),
+            common::CONTAINER.as_bytes().to_vec(),
+        ),
+        (
+            "OEBPS/content.opf".into(),
+            common::CLEAN_OPF.as_bytes().to_vec(),
+        ),
+        (
+            "OEBPS/toc.ncx".into(),
+            common::CLEAN_NCX.as_bytes().to_vec(),
+        ),
+        (
+            "OEBPS/ch1.xhtml".into(),
+            common::CLEAN_CH1.as_bytes().to_vec(),
+        ),
+    ];
+    for base in legal {
+        entries.push((format!("OEBPS/{base}"), b"p{}".to_vec()));
+    }
+    let borrowed: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
+    let (changes, out) = roundtrip(&make_epub(&borrowed));
+
+    assert!(
+        !changes.iter().any(|c| c.starts_with("renamed")),
+        "no rename is warranted here: {changes:?}"
+    );
+    for base in legal {
+        assert!(
+            has(&out, &format!("OEBPS/{base}")),
+            "{base} must survive untouched: {:?}",
+            names(&out)
+        );
+    }
+}
+
+/// `[` is legal in a file name and only breaks a reference that spells it raw,
+/// so the rename waits for that evidence rather than assuming it.
+#[test]
+fn encode_required_names_are_renamed_only_when_referenced_raw() {
+    let with_css = |href: &str| {
+        let ch1 = format!(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>
+  <link rel="stylesheet" type="text/css" href="{href}"/>
+</head><body><p>text</p></body></html>"#
+        );
+        make_epub(&[
+            ("META-INF/container.xml", common::CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", common::CLEAN_OPF.as_bytes()),
+            ("OEBPS/toc.ncx", common::CLEAN_NCX.as_bytes()),
+            ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+            ("OEBPS/a[1].css", b"p{}"),
+        ])
+    };
+
+    let (changes, out) = roundtrip(&with_css("a%5B1%5D.css"));
+    assert!(
+        !changes.iter().any(|c| c.starts_with("renamed")),
+        "the reference is encoded, so the book is already valid: {changes:?}"
+    );
+    assert!(has(&out, "OEBPS/a[1].css"), "{:?}", names(&out));
+
+    let (changes, out) = roundtrip(&with_css("a[1].css"));
+    assert!(
+        changes.iter().any(|c| c == "renamed 1 file(s)"),
+        "a raw \"[\" in a path segment is RSC-020: {changes:?}"
+    );
+    assert!(has(&out, "OEBPS/a_1_.css"), "{:?}", names(&out));
+    assert!(entry(&out, "OEBPS/ch1.xhtml").contains(r#"href="a_1_.css""#));
 }
 
 #[test]

@@ -378,42 +378,90 @@ fn duplicated_ncx_ids_are_made_unique() {
     );
 }
 
-#[test]
-fn a_pagelist_gets_both_required_attributes_or_none() {
-    // Supplying only `class` pushed a real book onto the strict validation path
-    // and introduced an error epubcheck had not been reporting.
+/// `id` and `class` on `<pageList>` are co-required, so all four combinations
+/// were measured against EPUB Check 5.2.1: neither and both are clean, exactly
+/// one is `missing required attribute`. Only that third shape is a defect.
+fn pagelist_book(attrs: &str) -> Vec<u8> {
     let opf = opf2(
         r#"    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
         r#"<itemref idref="ch1"/>"#,
     );
-    let toc = r#"<?xml version="1.0" encoding="utf-8"?>
+    let toc = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head><meta name="dtb:uid" content="urn:uuid:1234-5678"/></head>
   <docTitle><text>Test</text></docTitle>
   <navMap><navPoint id="n1" playOrder="1"><navLabel><text>A</text></navLabel>
     <content src="ch1.xhtml"/></navPoint></navMap>
-  <pageList>
-    <pageTarget id="pt1" type="normal" value="1" playOrder="2">
+  <pageList{attrs}>
+    <pageTarget id="pt1" type="normal" value="1" playOrder="1">
       <navLabel><text>1</text></navLabel><content src="ch1.xhtml"/>
     </pageTarget>
   </pageList>
-</ncx>"#;
-    let (outcome, after) = fix(&book(&[
+</ncx>"#
+    );
+    book(&[
         ("META-INF/container.xml", CONTAINER),
         ("OEBPS/content.opf", &opf),
-        ("OEBPS/toc.ncx", toc),
+        ("OEBPS/toc.ncx", &toc),
         ("OEBPS/ch1.xhtml", &doc("", "<p>text</p>")),
-    ]));
+    ])
+}
 
-    let fixed = entry(&after, "OEBPS/toc.ncx");
+#[test]
+fn a_pagelist_with_neither_attribute_is_left_alone() {
+    // The regression: this is the commonest shape in the wild and epubcheck is
+    // silent about it, but the fixer used to bolt both attributes on. It fired
+    // on three books that validated with no errors at all.
+    let before = pagelist_book("");
+    let (outcome, after) = fix(&before);
     assert!(
-        fixed.contains(r#"<pageList id="pagelist" class="pagelist">"#),
+        !outcome.changes.iter().any(|c| c.contains("pageList")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert_eq!(
+        entry(&after, "OEBPS/toc.ncx"),
+        entry(&read_epub(&before), "OEBPS/toc.ncx")
+    );
+}
+
+#[test]
+fn a_pagelist_with_both_attributes_is_left_alone() {
+    let before = pagelist_book(r#" id="pl" class="pagelist""#);
+    let (outcome, after) = fix(&before);
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("pageList")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert_eq!(
+        entry(&after, "OEBPS/toc.ncx"),
+        entry(&read_epub(&before), "OEBPS/toc.ncx")
+    );
+}
+
+#[test]
+fn a_half_attributed_pagelist_gets_its_partner() {
+    let (outcome, after) = fix(&pagelist_book(r#" id="pl""#));
+    let fixed = entry(&after, "OEBPS/toc.ncx");
+    // The partner goes in straight after the element name, so it lands before
+    // the attribute already there. Order is not something a schema cares about.
+    assert!(
+        fixed.contains(r#"<pageList class="pagelist" id="pl">"#),
         "{fixed}"
     );
     assert!(
         outcome.changes.iter().any(|c| c.contains("<pageList>")),
         "got {:?}",
         outcome.changes
+    );
+
+    let (_, after) = fix(&pagelist_book(r#" class="pagelist""#));
+    let fixed = entry(&after, "OEBPS/toc.ncx");
+    assert!(
+        fixed.contains(r#"<pageList id="pagelist" class="pagelist">"#),
+        "{fixed}"
     );
 }
 
