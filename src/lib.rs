@@ -108,9 +108,30 @@ pub fn migrate_book(book: &mut Book) -> Outcome {
     if book.epub_version() >= 3 {
         return Outcome::none();
     }
+    guarded(book, true, "EPUB 3 migration")
+}
 
+/// Repair a book that already *declares* EPUB 3 but was written as EPUB 2.
+///
+/// This is the mirror of [`migrate_book`], and it runs by default rather than
+/// behind a flag. The distinction is deliberate: changing a book's declared
+/// version is a policy choice, but a book carrying an XHTML 1.1 DOCTYPE, bare
+/// `&mdash;`, `opf:role` attributes and no nav document while claiming to be
+/// EPUB 3 is simply broken against its own declaration. Repairing that is
+/// ordinary work, and one of those errors — the undeclared entity — is fatal.
+///
+/// The version itself is never touched here.
+pub fn conform_book(book: &mut Book) -> Outcome {
+    if book.epub_version() < 3 {
+        return Outcome::none();
+    }
+    guarded(book, false, "EPUB 3 conformance repair")
+}
+
+/// Run the EPUB 3 work against a clone, and keep it only if nothing was lost.
+fn guarded(book: &mut Book, bump_version: bool, what: &str) -> Outcome {
     let mut candidate = book.clone();
-    let mut outcome = migrate::migrate(&mut candidate);
+    let mut outcome = migrate::apply(&mut candidate, bump_version);
     if !outcome.has_changes() {
         return outcome;
     }
@@ -124,7 +145,7 @@ pub fn migrate_book(book: &mut Book) -> Outcome {
     // Something would have been lost. Keep the findings, drop the changes.
     let mut aborted = Outcome::none();
     aborted.push_finding(format!(
-        "EPUB 3 migration was abandoned because it would not have preserved the book ({})",
+        "{what} was abandoned because it would not have preserved the book ({})",
         problems.join("; ")
     ));
     aborted.findings.append(&mut outcome.findings);
@@ -163,6 +184,8 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
     if opts.migrate_epub3 {
         outcome.merge(migrate_book(&mut book));
     }
+    // Always, flag or not: a book must at least satisfy the version it claims.
+    outcome.merge(conform_book(&mut book));
     outcome.merge(fix_book_with(&mut book, &selected));
     if !outcome.has_changes() || opts.dry_run {
         return Ok(outcome);

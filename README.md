@@ -100,6 +100,31 @@ running EPUB Check against a migrated book. The entity one is **fatal**:
 `<!DOCTYPE html>` declares no named entities, so a single unconverted `&mdash;`
 stops the parse dead.
 
+### The mirror case: declared EPUB 3, written as EPUB 2
+
+The same mismatch happens the other way round, and it is just as detectable: a
+book declaring `version="3.0"` while carrying XHTML 1.1 DOCTYPEs, bare
+`&mdash;` entities, `opf:role` attributes, no nav document and no
+`dcterms:modified`. A real fixture of that shape reports **1 fatal error and 13
+others**.
+
+That needs no flag and no guesswork, because there is nothing to decide. The
+book already says it is EPUB 3; it simply is not one yet. Repairing it is
+ordinary work, so it happens on a **normal run**, and it takes that fixture to
+zero. The undeclared-entity error is *fatal*, so leaving it alone is not an
+option.
+
+The dividing line is authority, not difficulty:
+
+* **Changing** a book's declared version is a policy choice — `--migrate-epub3`.
+* Making a book satisfy the version it **already declares** is repair — default.
+
+The version number itself is never touched by the default path, in either
+direction. In particular nothing ever downgrades EPUB 3 to EPUB 2: it would be
+lossy (the nav document has no EPUB 2 equivalent), and for markup that relies on
+HTML5 content models it would create far more errors than it removed — the
+Coleridge situation in reverse.
+
 ### Why this is safe to automate
 
 Whether the EPUB 2 declaration was the mistake or the markup was is not
@@ -168,10 +193,16 @@ epubfix --only ncx-uid book.epub   # just one fix
 
 - **Nothing is written unless something actually changed.** A clean book keeps
   its exact bytes, so re-running over a library is free and idempotent.
-- **The replacement is staged.** Each book is rebuilt into a sibling
-  `.epubfix.tmp` and moved into place only once it is complete, so an
-  interrupted run cannot leave a truncated book behind. A failed run removes the
-  temporary file.
+- **One read, one write, whatever happens.** The book is loaded into memory
+  once; migration, conformance repair and every fixer all run there, in order,
+  on that single copy. Only the finished result reaches the disk. Converting a
+  book to EPUB 3 does not produce an intermediate file that then gets rewritten
+  — after any run there are exactly two files: the repaired book, and one
+  `.bak` holding the original.
+- **The replacement is staged.** Each book is written to a sibling
+  `.epubfix.tmp` and *renamed* over the original — a rename, not a second copy —
+  only once it is complete, so an interrupted run cannot leave a truncated book
+  behind. A failed run removes the temporary file.
 - **A `.bak` is kept** next to each modified book. An existing `.bak` is never
   overwritten, so a second run cannot replace the pristine original with an
   already-modified copy. `--no-backup` opts out.

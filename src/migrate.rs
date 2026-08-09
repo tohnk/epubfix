@@ -48,9 +48,17 @@ static ENTITY_RE: LazyLock<Regex> = LazyLock::new(|| re(r"&([A-Za-z][A-Za-z0-9]*
 static PKG_VERSION_RE: LazyLock<Regex> =
     LazyLock::new(|| re(r#"(<package\b[^>]*?\bversion=")([^"]*)(")"#));
 
-/// Run the whole migration. Returns the outcome; on abort the book is untouched
-/// by the caller, which works on a clone.
-pub fn migrate(book: &mut Book) -> Outcome {
+/// Bring `book` up to what EPUB 3 requires.
+///
+/// With `bump_version` the package declaration is changed too — that is
+/// migration proper, and a policy choice. Without it, everything else still
+/// applies: a book that already *declares* EPUB 3 while carrying EPUB 2 markup
+/// is simply broken against its own declaration, and repairing that is ordinary
+/// work. The two share every step because the requirements are the same.
+///
+/// Returns the outcome; on abort the book is untouched by the caller, which
+/// works on a clone.
+pub fn apply(book: &mut Book, bump_version: bool) -> Outcome {
     let mut outcome = Outcome::none();
 
     let Some(opf_name) = book.opf_name().map(str::to_owned) else {
@@ -68,7 +76,7 @@ pub fn migrate(book: &mut Book) -> Outcome {
     let nav = build_nav(book, &opf_name, &mut outcome);
 
     // 3. The package document.
-    rewrite_package(book, &opf_name, nav.as_deref(), &mut outcome);
+    rewrite_package(book, &opf_name, nav.as_deref(), bump_version, &mut outcome);
 
     outcome
 }
@@ -517,7 +525,13 @@ fn declare_properties(book: &Book, opf_name: &str, nodes: &[Node], edits: &mut E
     count
 }
 
-fn rewrite_package(book: &mut Book, opf_name: &str, nav_doc: Option<&str>, outcome: &mut Outcome) {
+fn rewrite_package(
+    book: &mut Book,
+    opf_name: &str,
+    nav_doc: Option<&str>,
+    bump_version: bool,
+    outcome: &mut Outcome,
+) {
     let Some(text) = book.text(opf_name).map(str::to_owned) else {
         return;
     };
@@ -536,7 +550,8 @@ fn rewrite_package(book: &mut Book, opf_name: &str, nav_doc: Option<&str>, outco
         .map(|a| a.value.clone())
         .collect();
 
-    if let Some(c) = PKG_VERSION_RE.captures(&text)
+    if bump_version
+        && let Some(c) = PKG_VERSION_RE.captures(&text)
         && &c[2] != "3.0"
     {
         edits.replace(c.get(2).expect("group 2").range(), "3.0");

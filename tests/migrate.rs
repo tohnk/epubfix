@@ -3,7 +3,10 @@
 mod common;
 
 use common::verify::verify;
-use common::{entry, epub2, epub2_ncx, epub3, has, read_epub, roundtrip_full, roundtrip_migrated};
+use common::{
+    entry, epub2, epub2_ncx, epub3, epub3_written_as_epub2, has, read_epub, roundtrip_full,
+    roundtrip_migrated,
+};
 
 /// Migrate, then assert nothing structural was lost.
 fn migrate(before: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
@@ -122,15 +125,16 @@ fn migration_is_idempotent_and_does_not_churn_the_timestamp() {
 }
 
 #[test]
-fn an_epub3_book_is_left_alone_by_the_migration() {
-    // This fixture already has a nav document; migration must not touch the
-    // version, generate a second nav, or add another dcterms:modified.
+fn an_epub3_book_keeps_its_version_and_its_nav() {
+    // The fixture already declares EPUB 3 and has a nav document, so migration
+    // has nothing to do. Its verse does use `&mdash;`, which is a *fatal* error
+    // in EPUB 3, so the conformance pass rewrites that and nothing else.
     let before = epub3(VERSE, "<p>x</p>");
     let (outcome, after) = migrate(&before);
 
     assert!(
         !outcome.changes.iter().any(|c| c.contains("3.0")),
-        "got {:?}",
+        "version untouched: {:?}",
         outcome.changes
     );
     assert!(
@@ -139,10 +143,90 @@ fn an_epub3_book_is_left_alone_by_the_migration() {
         outcome.changes
     );
     assert_eq!(
-        read_epub(&before),
-        after,
-        "an EPUB 3 book must come through untouched"
+        entry(&after, "OEBPS/nav.xhtml"),
+        entry(&read_epub(&before), "OEBPS/nav.xhtml"),
+        "the existing nav must be left exactly as it was"
     );
+}
+
+#[test]
+fn a_genuinely_clean_epub3_book_comes_through_byte_identical() {
+    let before = epub3("<p id=\"a\">plain prose</p>", "<p>x</p>");
+    let (outcome, after) = migrate(&before);
+    assert!(!outcome.has_changes(), "got {:?}", outcome.changes);
+    assert_eq!(read_epub(&before), after);
+}
+
+// ---------------------------------------------------------------------------
+// The mirror case: declared EPUB 3, written as EPUB 2
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_book_declaring_epub3_but_written_as_epub2_is_repaired_without_any_flag() {
+    // Changing a book's declared version is a policy choice and needs the flag.
+    // Making a book satisfy the version it *already declares* is ordinary work,
+    // and one of these errors — the undeclared entity — is fatal.
+    let before = epub3_written_as_epub2("<p>Came loud&mdash;and hark, again!</p>");
+    let (outcome, after) = roundtrip_full(&before);
+    let opf = entry(&after, "OEBPS/content.opf");
+    let ch1 = entry(&after, "OEBPS/ch1.xhtml");
+
+    assert!(ch1.contains("<!DOCTYPE html>"), "{ch1}");
+    assert!(
+        ch1.contains("&#8212;"),
+        "the fatal entity is rewritten: {ch1}"
+    );
+    assert!(opf.contains("dcterms:modified"), "{opf}");
+    assert!(opf.contains(r#"properties="nav""#), "{opf}");
+    assert!(has(&after, "OEBPS/nav.xhtml"), "nav built from the NCX");
+    assert!(
+        opf.contains(r#"property="role""#),
+        "opf:role converted: {opf}"
+    );
+    assert!(!opf.contains("opf:role"), "{opf}");
+
+    // The version was already 3.0 and must not be reported as changed.
+    assert!(opf.contains(r#"version="3.0""#), "{opf}");
+    assert!(
+        !outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("package version")),
+        "nothing to bump: {:?}",
+        outcome.changes
+    );
+}
+
+#[test]
+fn conformance_repair_is_idempotent() {
+    let before = epub3_written_as_epub2("<p>Came loud&mdash;and hark!</p>");
+    let (first, after) = roundtrip_full(&before);
+    assert!(first.has_changes());
+
+    let repacked = common::make_epub(
+        &after
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect::<Vec<_>>(),
+    );
+    let (second, again) = roundtrip_full(&repacked);
+    assert!(
+        !second.has_changes(),
+        "second pass should be a no-op: {:?}",
+        second.changes
+    );
+    assert_eq!(after, again);
+}
+
+#[test]
+fn conformance_never_downgrades_a_book() {
+    // A book declaring EPUB 3 stays EPUB 3 even when everything about it looks
+    // like EPUB 2. Downgrading would be lossy and, for markup relying on HTML5
+    // content models, would create far more errors than it removed.
+    let before = epub3_written_as_epub2(VERSE);
+    let (_, after) = roundtrip_full(&before);
+    assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="3.0""#));
+    assert!(!entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#));
 }
 
 #[test]

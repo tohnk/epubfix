@@ -61,9 +61,13 @@ pub fn roundtrip(bytes: &[u8]) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
 }
 
 /// As [`roundtrip`], but keeps the findings too.
+///
+/// Mirrors what `fix_file` does on a default run: conformance repair, then the
+/// fixers. If these drift apart the tests stop testing the real pipeline.
 pub fn roundtrip_full(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
     let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
-    let outcome = epubfix::fix_book(&mut book);
+    let mut outcome = epubfix::conform_book(&mut book);
+    outcome.merge(epubfix::fix_book(&mut book));
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
     (outcome, read_epub(&out.into_inner()))
@@ -240,6 +244,7 @@ pub fn epub2_ncx(ch1_body: &str, ch2_body: &str, ncx: &str) -> Vec<u8> {
 pub fn roundtrip_migrated(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
     let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
     let mut outcome = epubfix::migrate_book(&mut book);
+    outcome.merge(epubfix::conform_book(&mut book));
     outcome.merge(epubfix::fix_book(&mut book));
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
@@ -262,4 +267,36 @@ fn build(v3: bool, ch1_body: &str, ch2_body: &str) -> Vec<u8> {
         files.push(("OEBPS/toc.ncx", CLEAN_NCX.as_bytes()));
     }
     make_epub(&files)
+}
+
+/// A book that *declares* EPUB 3 but is written as EPUB 2 throughout: XHTML 1.1
+/// DOCTYPEs, a named entity, `opf:` attributes, no nav document and no
+/// `dcterms:modified`. The mirror of the mis-declared EPUB 2 case.
+pub fn epub3_written_as_epub2(ch1_body: &str) -> Vec<u8> {
+    let opf = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:identifier id="BookId" opf:scheme="UUID">urn:uuid:1234-5678</dc:identifier>
+    <dc:title>Test</dc:title><dc:language>en</dc:language>
+    <dc:creator opf:role="aut" opf:file-as="Coleridge, Samuel">Samuel Coleridge</dc:creator>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
+</package>"#;
+    let ch1 = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \
+         \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+         <head><title>T</title></head>\n<body>\n{ch1_body}\n</body></html>"
+    );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/toc.ncx", CLEAN_NCX.as_bytes()),
+    ])
 }
