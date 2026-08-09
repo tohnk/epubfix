@@ -24,7 +24,8 @@ OPTIONS:
     -n, --dry-run       report what would change; write nothing
         --no-backup     do not keep a .bak copy of the original
     -r, --recursive     descend into subdirectories when scanning a folder
-        --migrate-epub3 convert EPUB 2 books to EPUB 3 first (see below)
+        --migrate-epub3 force an upgrade to EPUB 3 even if unnecessary
+        --keep-version  never change a book's declared EPUB version
         --only NAMES    run only these fixers (comma-separated, see --list)
     -l, --list          list the available fixers and exit
         --pause         wait for Enter before exiting
@@ -39,17 +40,27 @@ Anything a fixer recognises as wrong but will not repair on its own is listed
 under \"needs manual attention\" instead of being guessed at. Use --dry-run to
 triage a whole library without writing to it.
 
-MIGRATION:
-    Some books declare EPUB 2 but carry markup that only validates as HTML5 -
-    typically verse in <blockquote>, which XHTML 1.1 will not accept. Repairing
-    the markup can mean thousands of edits; --migrate-epub3 flips the book to
-    EPUB 3 instead, generating the nav document, metadata and manifest
-    properties EPUB 3 requires. It runs before every other fix, since the
-    version decides what those fixes should do.
+VERSION RETAGGING:
+    Books are often declared as the wrong EPUB version, in both directions. The
+    declaration is one attribute; the content is thousands of elements. So when
+    they disagree, epubfix moves the declaration to match the content rather
+    than rewriting the content to match the declaration.
 
-    It is off by default because it changes the file's format identity, and
-    some older reading systems are EPUB 2 only. A migration that would lose a
-    link, an id or any visible text is abandoned and the book left alone.
+    Content that needs EPUB 3 (verse in <blockquote>, HTML5 elements, epub:
+    attributes, a nav document) in a book declaring EPUB 2 -> upgraded, and the
+    nav document, metadata and manifest properties EPUB 3 requires are
+    generated. A book declaring EPUB 3 with none of that, written throughout as
+    EPUB 2 -> downgraded, which is a single attribute plus a little package
+    cleanup.
+
+    Only decisive evidence retags. Mixed evidence leaves the declaration alone
+    and repairs the book against whatever it currently claims. A retag that
+    would lose a link, an id or any visible text is abandoned and the book left
+    untouched. This all runs before every other fix, since the version decides
+    what those fixes should do.
+
+    --keep-version turns retagging off; --migrate-epub3 forces an upgrade even
+    when the content does not require one.
 
 EXIT STATUS:
     0  all good
@@ -85,6 +96,7 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
             "--no-backup" => parsed.opts.backup = false,
             "-r" | "--recursive" => parsed.recursive = true,
             "--migrate-epub3" => parsed.opts.migrate_epub3 = true,
+            "--keep-version" => parsed.opts.keep_version = true,
             "--pause" => parsed.pause = Some(true),
             "--no-pause" => parsed.pause = Some(false),
             "-l" | "--list" => {

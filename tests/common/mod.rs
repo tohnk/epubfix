@@ -62,11 +62,11 @@ pub fn roundtrip(bytes: &[u8]) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
 
 /// As [`roundtrip`], but keeps the findings too.
 ///
-/// Mirrors what `fix_file` does on a default run: conformance repair, then the
+/// Mirrors what `fix_file` does on a default run: version retagging, then the
 /// fixers. If these drift apart the tests stop testing the real pipeline.
 pub fn roundtrip_full(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
     let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
-    let mut outcome = epubfix::conform_book(&mut book);
+    let mut outcome = epubfix::retag_book(&mut book);
     outcome.merge(epubfix::fix_book(&mut book));
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
@@ -238,6 +238,16 @@ pub fn epub2_ncx(ch1_body: &str, ch2_body: &str, ncx: &str) -> Vec<u8> {
         ("OEBPS/ch2.xhtml", ch2.as_bytes()),
         ("OEBPS/toc.ncx", ncx.as_bytes()),
     ])
+}
+
+/// The `--keep-version` path: repair against the declared version, never retag.
+pub fn roundtrip_kept(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
+    let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
+    let mut outcome = epubfix::conform_book(&mut book);
+    outcome.merge(epubfix::fix_book(&mut book));
+    let mut out = Cursor::new(Vec::new());
+    book.save(&mut out).unwrap();
+    (outcome, read_epub(&out.into_inner()))
 }
 
 /// Load, migrate, then run the fixers, exactly as `--migrate-epub3` does.

@@ -616,6 +616,94 @@ fn rewrite_package(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Downgrade
+// ---------------------------------------------------------------------------
+
+/// Retag a book as EPUB 2, for content that never needed EPUB 3.
+///
+/// The content documents are already correct for EPUB 2 — that is what
+/// [`crate::version::assess`] established before this runs — so only the package
+/// document changes: the version, the EPUB 3-only constructs that would now be
+/// errors, and the `toc` attribute EPUB 2 needs to find the NCX.
+pub fn downgrade(book: &mut Book) -> Outcome {
+    let mut outcome = Outcome::none();
+    let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+        return outcome;
+    };
+    let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+        return outcome;
+    };
+    let nodes = match scan(&text) {
+        Ok(n) => n,
+        Err(e) => {
+            outcome.push_finding(format!("could not parse the package document ({e})"));
+            return outcome;
+        }
+    };
+
+    let mut edits = Edits::new();
+
+    if let Some(c) = PKG_VERSION_RE.captures(&text)
+        && &c[2] != "2.0"
+    {
+        edits.replace(c.get(2).expect("group 2").range(), "2.0");
+        outcome.push_change(format!("package version {} -> 2.0", &c[2]));
+    }
+
+    // <meta property="..."> is EPUB 3 syntax; EPUB 2 wants name/content.
+    let mut dropped_meta = 0u32;
+    for (i, node) in nodes.iter().enumerate() {
+        if node.name != "meta" || node.kind == NodeKind::End || node.attr("property").is_none() {
+            continue;
+        }
+        edits.delete(nodes[i].element_span(&nodes));
+        dropped_meta += 1;
+    }
+    if dropped_meta > 0 {
+        outcome.push_change(format!(
+            "removed {dropped_meta} EPUB 3-only <meta property> element(s)"
+        ));
+    }
+
+    // manifest/@properties does not exist in EPUB 2.
+    let mut dropped_props = 0u32;
+    for node in nodes.iter().filter(|n| n.name == "item") {
+        if let Some(a) = node.attr("properties") {
+            edits.delete(a.span_with_space.clone());
+            dropped_props += 1;
+        }
+    }
+    if dropped_props > 0 {
+        outcome.push_change(format!(
+            "removed {dropped_props} manifest properties attribute(s)"
+        ));
+    }
+
+    // EPUB 2 finds the NCX through spine/@toc.
+    if let Some(spine) = nodes
+        .iter()
+        .find(|n| n.name == "spine" && n.kind != NodeKind::End)
+        && spine.attr("toc").is_none()
+        && let Some(ncx_id) = nodes
+            .iter()
+            .filter(|n| n.name == "item")
+            .find(|n| {
+                n.attr("media-type")
+                    .is_some_and(|m| m.value == "application/x-dtbncx+xml")
+            })
+            .and_then(|n| n.attr("id"))
+    {
+        edits.insert(spine.name_end, format!(" toc=\"{}\"", ncx_id.value));
+        outcome.push_change("pointed spine/@toc at the NCX".to_string());
+    }
+
+    if !edits.is_empty() {
+        book.set_text(&opf_name, edits.apply(&text));
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

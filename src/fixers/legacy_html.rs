@@ -10,7 +10,7 @@ use regex::Regex;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::markup::{Edits, NodeKind, scan};
+use crate::markup::{Edits, scan};
 use crate::util::{basename, re};
 
 // ---------------------------------------------------------------------------
@@ -101,27 +101,14 @@ impl Fixer for ImgAlt {
 // version-mismatch (diagnostic only)
 // ---------------------------------------------------------------------------
 
-/// Elements whose XHTML 1.1 content model is block-level only, but whose HTML5
-/// content model is flow.
-const BLOCK_ONLY: &[&str] = &["blockquote", "body", "form", "noscript", "fieldset"];
-
-/// Elements that are inline in XHTML 1.1, so illegal as a direct child above.
-const INLINE: &[&str] = &[
-    "a", "abbr", "acronym", "b", "bdo", "big", "br", "button", "cite", "code", "dfn", "em", "font",
-    "i", "img", "input", "kbd", "label", "map", "object", "q", "s", "samp", "select", "small",
-    "span", "strike", "strong", "sub", "sup", "textarea", "tt", "u", "var",
-];
-
-/// Reports an EPUB 2 book whose content only validates under HTML5 rules.
+/// Reports a book whose markup does not match its declared version, when there
+/// is not enough evidence to retag it automatically.
 ///
-/// The giveaway is verse: `<blockquote>` holding bare text or a bare `<span>`,
-/// which XHTML 1.1 forbids and HTML5 allows. One real book produced 28,874
-/// errors as EPUB 2 and 728 as EPUB 3 — byte-identical markup, one wrong
-/// attribute in the package document.
-///
-/// Rewriting the markup to satisfy XHTML 1.1 would mean wrapping every inline
-/// run in a `<div>`: thousands of edits across hundreds of files to work around
-/// one attribute. So this only ever reports, and points at `--migrate-epub3`.
+/// The retagging in [`crate::version`] handles the clear-cut cases in both
+/// directions. What is left is the middle: a book declaring EPUB 2 with a
+/// handful of inline runs inside `<blockquote>`. Too few to justify changing the
+/// book's format identity, too awkward to repair without wrapping each one in a
+/// `<div>`. So it says so, and stops.
 pub struct VersionMismatch;
 
 impl Fixer for VersionMismatch {
@@ -132,7 +119,7 @@ impl Fixer for VersionMismatch {
         &["RSC-005"]
     }
     fn description(&self) -> &'static str {
-        "report EPUB 2 books whose markup only validates as EPUB 3 (never rewrites)"
+        "report markup that does not match the declared version (never rewrites)"
     }
 
     fn apply(&self, book: &mut Book) -> Outcome {
@@ -140,48 +127,14 @@ impl Fixer for VersionMismatch {
         if book.epub_version() >= 3 {
             return outcome;
         }
-
-        let mut violations = 0u32;
-        let mut documents = 0u32;
-        for doc in book.markup_names() {
-            let Some(text) = book.text(&doc) else {
-                continue;
-            };
-            let Ok(nodes) = scan(text) else { continue };
-
-            let mut here = 0u32;
-            for (i, node) in nodes.iter().enumerate() {
-                if node.kind != NodeKind::Start || !BLOCK_ONLY.contains(&node.name.as_str()) {
-                    continue;
-                }
-                if node.has_text {
-                    here += 1;
-                }
-                here += u32::try_from(
-                    nodes
-                        .iter()
-                        .filter(|c| {
-                            c.parent == Some(i)
-                                && c.kind != NodeKind::End
-                                && INLINE.contains(&c.name.as_str())
-                        })
-                        .count(),
-                )
-                .unwrap_or(u32::MAX);
-            }
-            if here > 0 {
-                documents += 1;
-                violations += here;
-            }
-        }
-
-        if violations > 0 {
+        let assessment = crate::version::assess(book);
+        if assessment.suggestive_only() {
             outcome.push_finding(format!(
-                "declares EPUB 2, but {violations} element(s) across {documents} document(s) \
-                 hold inline content that only validates under EPUB 3 rules (verse in \
-                 <blockquote>, typically). Repairing the markup would mean wrapping every one \
-                 of them in a <div>; --migrate-epub3 fixes it by changing the declaration \
-                 instead, and is checked to preserve the whole book before it lands."
+                "declares EPUB 2, but {} element(s) hold inline content that only validates \
+                 under EPUB 3 rules (verse in <blockquote>, typically). That is too few to \
+                 retag the whole book on, so nothing was changed; wrap them in a <div> by \
+                 hand, or use --migrate-epub3 to change the declaration instead.",
+                assessment.inline_in_block
             ));
         }
         outcome

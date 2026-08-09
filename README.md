@@ -39,7 +39,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `filenames` | RSC-020, PKG-010 | renames resources whose filenames need URL escaping (spaces, non-ASCII, …) and updates every reference, raw or percent-encoded |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |
 | `ncx-uid` | NCX-001 | syncs `dtb:uid` to the OPF `unique-identifier`, byte for byte |
-| `version-mismatch` | RSC-005 | reports an EPUB 2 book whose markup only validates as EPUB 3 — diagnostic only, never rewrites |
+| `version-mismatch` | RSC-005 | reports markup that does not match the declared version, where the evidence is too weak to retag on — diagnostic only |
 
 `epubfix --list` prints the same table.
 
@@ -68,17 +68,55 @@ the nearest legal element (the following row, else the preceding one, else the
 table), which is valid under both rulesets and keeps the link landing in the
 same place.
 
-## Migrating EPUB 2 to EPUB 3
+## Version retagging
 
-Some books declare EPUB 2 but carry markup that only validates as HTML5 — most
-often verse set in `<blockquote>`, which XHTML 1.1 requires to hold block-level
-children while HTML5 accepts flow content. One real book reported **28,874
-errors as EPUB 2 and 728 as EPUB 3**, from byte-identical markup. Repairing it
-to satisfy XHTML 1.1 would mean wrapping ~13,500 inline runs in `<div>`s across
-394 files, to work around one wrong attribute in the package document.
+Books are often declared as the wrong EPUB version, and it happens in both
+directions. **The declaration is one attribute; the content is thousands of
+elements.** So when they disagree, epubfix moves the declaration to match the
+content — not the other way round. This is the default, in both directions.
 
-`version-mismatch` detects this and says so. `--migrate-epub3` is how you act on
-it. Everything EPUB 3 additionally requires is derived from the file itself:
+Toward EPUB 2 it is not even a choice: there is no XHTML 1.1 spelling of a nav
+document or of inline SVG, so a genuinely EPUB 3 book cannot be rewritten
+downward at all.
+
+| The book | What happens |
+| --- | --- |
+| declares EPUB 2, content needs HTML5 | **upgraded**, and given the nav document, metadata and manifest properties EPUB 3 requires |
+| declares EPUB 3, nothing needs HTML5 | **downgraded** — one attribute, plus stripping the EPUB 3-only package constructs |
+| declares EPUB 3, content needs HTML5 | declaration kept, book repaired forward to satisfy it |
+| evidence mixed or weak | declaration kept, and the book is reported |
+
+Measured against EPUB Check 5.2.1, on a default run with no flags:
+
+```
+A  EPUB 2 content, declared 3   v3.0  1 fatal + 11 errors  ->  v2.0  0
+B  HTML5 content, declared 2    v2.0        24 errors      ->  v3.0  0
+C  HTML5 content, declared 3    v3.0  1 fatal + 13 errors  ->  v3.0  0
+```
+
+### The two-sided test
+
+A book can carry evidence of both, so one signal is not enough. Case C above has
+every EPUB 2 marker there is — XHTML 1.1 DOCTYPEs, bare `&mdash;`, `opf:role`,
+no nav — and is still not downgraded, because its verse only validates as HTML5.
+Downgrading would trade a handful of errors for a great many.
+
+**Decisive** (any occurrence means the book is EPUB 3): HTML5-only elements,
+`epub:` attributes, `<meta charset>`, inline SVG or MathML, a nav document,
+`<meta refines>` metadata.
+
+**Suggestive** (only counts in quantity): inline content inside `<blockquote>`
+and other block-only containers. A handful of these means a few paragraphs need
+a `<div>`, not that the whole book is the wrong format — retagging on that
+evidence would be wildly out of proportion. Past a threshold the balance flips:
+repairing would mean hundreds of edits, so the one wrong attribute is
+overwhelmingly the likelier error. Below it, the book is reported and left
+alone.
+
+**EPUB 2 markers** (suggestive, and repairable either way): XHTML 1.1 DOCTYPEs,
+named character entities, `opf:role`/`file-as`/`scheme`, an NCX with no nav.
+
+### What EPUB 3 requires, and where it comes from
 
 | Requirement | Where it comes from |
 | --- | --- |
@@ -100,51 +138,28 @@ running EPUB Check against a migrated book. The entity one is **fatal**:
 `<!DOCTYPE html>` declares no named entities, so a single unconverted `&mdash;`
 stops the parse dead.
 
-### The mirror case: declared EPUB 3, written as EPUB 2
-
-The same mismatch happens the other way round, and it is just as detectable: a
-book declaring `version="3.0"` while carrying XHTML 1.1 DOCTYPEs, bare
-`&mdash;` entities, `opf:role` attributes, no nav document and no
-`dcterms:modified`. A real fixture of that shape reports **1 fatal error and 13
-others**.
-
-That needs no flag and no guesswork, because there is nothing to decide. The
-book already says it is EPUB 3; it simply is not one yet. Repairing it is
-ordinary work, so it happens on a **normal run**, and it takes that fixture to
-zero. The undeclared-entity error is *fatal*, so leaving it alone is not an
-option.
-
-The dividing line is authority, not difficulty:
-
-* **Changing** a book's declared version is a policy choice — `--migrate-epub3`.
-* Making a book satisfy the version it **already declares** is repair — default.
-
-The version number itself is never touched by the default path, in either
-direction. In particular nothing ever downgrades EPUB 3 to EPUB 2: it would be
-lossy (the nav document has no EPUB 2 equivalent), and for markup that relies on
-HTML5 content models it would create far more errors than it removed — the
-Coleridge situation in reverse.
+A downgrade is the mirror: the content documents are already right, so only the
+package changes — the version, the `<meta property>` and `properties=`
+constructs that would now be errors, and `spine/@toc` so EPUB 2 can find the
+NCX.
 
 ### Why this is safe to automate
 
-Whether the EPUB 2 declaration was the mistake or the markup was is not
-decidable, and does not need to be. Migration runs against a **clone** of the
-book and is kept only if it preserved everything: no entry dropped, no id lost
-or duplicated, no visible text changed, and every internal link still resolving.
-If any of that fails the migration is abandoned and the book is left untouched.
-Gating on the outcome sidesteps the unanswerable question.
+Whether the declaration was the mistake or the markup was is not decidable, and
+does not need to be. Every retag runs against a **clone** of the book and is
+kept only if it preserved everything: no entry dropped, no id lost or
+duplicated, no visible text changed, and every internal link still resolving. If
+any of that fails the retag is abandoned and the book left untouched. Gating on
+the outcome sidesteps the unanswerable question.
 
-It runs **before** every other fix, because the version decides what those fixes
-should do — `legacy-table-attrs` strips a much larger set under HTML5 rules, and
-`img-alt` stops applying at all.
-
-It is **off by default**. Migration changes the file's format identity, and some
-older reading systems are EPUB 2 only. That is a policy choice, not something
-the tool can compute.
+Retagging runs **before** every other fix, because the version decides what
+those fixes should do — `legacy-table-attrs` strips a much larger set under
+HTML5 rules, and `img-alt` stops applying at all.
 
 ```sh
-epubfix --dry-run -r ~/Books        # which books would migration help?
-epubfix --migrate-epub3 book.epub   # then act on it
+epubfix --dry-run -r ~/Books        # what would move, and why
+epubfix --keep-version book.epub    # repair, but never touch the declaration
+epubfix --migrate-epub3 book.epub   # force EPUB 3 even if unnecessary
 ```
 
 ## Usage
@@ -155,7 +170,8 @@ epubfix [OPTIONS] [FILE_OR_DIR ...]
 -n, --dry-run       report what would change; write nothing
     --no-backup     do not keep a .bak copy of the original
 -r, --recursive     descend into subdirectories when scanning a folder
-    --migrate-epub3 convert EPUB 2 books to EPUB 3 first
+    --keep-version  never change a book's declared EPUB version
+    --migrate-epub3 force an upgrade to EPUB 3 even if unnecessary
     --only NAMES    run only these fixers (comma-separated, see --list)
 -l, --list          list the available fixers and exit
     --pause         wait for Enter before exiting
@@ -316,7 +332,8 @@ Verified end to end against EPUB Check 5.2.1. Fixture books carrying every
 defect above validate with zero errors afterwards, as **both** EPUB 2 (9 errors
 to 0) and EPUB 3 (20 errors to 0); a Coleridge-shaped EPUB 2 book with verse in
 `<blockquote>`, legacy `opf:` metadata, a nested NCX with a `pageList` and
-uncaptioned images goes from 24 errors to 0 under `--migrate-epub3`.
+uncaptioned images goes from 24 errors to 0, and a book declaring EPUB 3 while written as EPUB 2
+goes from 1 fatal + 11 errors to 0 by being retagged downward.
 
 ## Origin
 

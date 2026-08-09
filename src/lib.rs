@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod refs;
 pub mod util;
 pub mod verify;
+pub mod version;
 
 use std::fmt;
 use std::fs::{self, File};
@@ -64,6 +65,10 @@ impl From<zip::result::ZipError> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flat CLI flags, one field per flag"
+)]
 pub struct Options {
     /// Report what would change without writing anything.
     pub dry_run: bool,
@@ -71,12 +76,10 @@ pub struct Options {
     pub backup: bool,
     /// Run only these fixers, by [`Fixer::name`]. Empty means all of them.
     pub only: Vec<String>,
-    /// Convert an EPUB 2 book to EPUB 3 before running the fixers.
-    ///
-    /// Off by default: migration changes the file's format identity, and some
-    /// older reading systems are EPUB 2 only. That is a policy choice, not
-    /// something the tool can compute.
+    /// Force an upgrade to EPUB 3 even when the content does not require it.
     pub migrate_epub3: bool,
+    /// Never change the declared version, only repair against it.
+    pub keep_version: bool,
 }
 
 impl Default for Options {
@@ -86,6 +89,7 @@ impl Default for Options {
             backup: true,
             only: Vec::new(),
             migrate_epub3: false,
+            keep_version: false,
         }
     }
 }
@@ -108,7 +112,7 @@ pub fn migrate_book(book: &mut Book) -> Outcome {
     if book.epub_version() >= 3 {
         return Outcome::none();
     }
-    guarded(book, true, "EPUB 3 migration")
+    guarded(book, "EPUB 3 migration", |b| migrate::apply(b, true))
 }
 
 /// Repair a book that already *declares* EPUB 3 but was written as EPUB 2.
@@ -125,13 +129,48 @@ pub fn conform_book(book: &mut Book) -> Outcome {
     if book.epub_version() < 3 {
         return Outcome::none();
     }
-    guarded(book, false, "EPUB 3 conformance repair")
+    guarded(book, "EPUB 3 conformance repair", |b| {
+        migrate::apply(b, false)
+    })
 }
 
-/// Run the EPUB 3 work against a clone, and keep it only if nothing was lost.
-fn guarded(book: &mut Book, bump_version: bool, what: &str) -> Outcome {
+/// Move a book's declared version to match what it actually contains.
+///
+/// This is the default behaviour, and it runs in both directions. The
+/// declaration is one attribute and the content is thousands of elements, so
+/// when they disagree the declaration is what should move — rewriting a book to
+/// satisfy a wrong attribute is backwards, and toward EPUB 2 it is not even
+/// possible, since there is no XHTML 1.1 spelling of a nav document.
+///
+/// Only decisive evidence retags. A book whose content genuinely needs EPUB 3
+/// is never downgraded, and a book with mixed evidence is left declared as it
+/// is and repaired against that declaration instead.
+pub fn retag_book(book: &mut Book) -> Outcome {
+    let assessment = version::assess(book);
+    let retag = version::decide(book, &assessment);
+    let why = version::reason(&assessment, retag);
+
+    let mut outcome = match retag {
+        version::Retag::Upgrade => guarded(book, "EPUB 3 upgrade", |b| migrate::apply(b, true)),
+        version::Retag::Downgrade => guarded(book, "EPUB 2 downgrade", migrate::downgrade),
+        // Declaration already fits, or the evidence is mixed. Either way, make
+        // the book satisfy whatever it currently claims to be.
+        version::Retag::Keep => return conform_book(book),
+    };
+
+    if outcome.has_changes() {
+        outcome.changes.insert(0, format!("retagged: {why}"));
+    }
+    outcome
+}
+
+/// Run a transformation against a clone, and keep it only if nothing was lost.
+fn guarded<F>(book: &mut Book, what: &str, f: F) -> Outcome
+where
+    F: FnOnce(&mut Book) -> Outcome,
+{
     let mut candidate = book.clone();
-    let mut outcome = migrate::apply(&mut candidate, bump_version);
+    let mut outcome = f(&mut candidate);
     if !outcome.has_changes() {
         return outcome;
     }
@@ -183,9 +222,12 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
     let mut outcome = Outcome::none();
     if opts.migrate_epub3 {
         outcome.merge(migrate_book(&mut book));
+        outcome.merge(conform_book(&mut book));
+    } else if opts.keep_version {
+        outcome.merge(conform_book(&mut book));
+    } else {
+        outcome.merge(retag_book(&mut book));
     }
-    // Always, flag or not: a book must at least satisfy the version it claims.
-    outcome.merge(conform_book(&mut book));
     outcome.merge(fix_book_with(&mut book, &selected));
     if !outcome.has_changes() || opts.dry_run {
         return Ok(outcome);

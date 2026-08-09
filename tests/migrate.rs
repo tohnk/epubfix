@@ -47,16 +47,56 @@ const NESTED_NCX: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 // ---------------------------------------------------------------------------
 
 #[test]
-fn migration_is_off_unless_asked_for() {
-    // The plain path must never change a book's format identity.
-    let (outcome, after) = roundtrip_full(&epub2(VERSE, "<p>x</p>"));
+fn keep_version_suppresses_retagging_entirely() {
+    // A book whose verse plainly needs EPUB 3, held at EPUB 2 on request.
+    let (outcome, after) = common::roundtrip_kept(&epub2(&VERSE.repeat(8), "<p>x</p>"));
     assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#));
     assert!(!has(&after, "OEBPS/nav.xhtml"));
     assert!(
-        !outcome.changes.iter().any(|c| c.contains("3.0")),
+        !outcome.changes.iter().any(|c| c.contains("retagged")),
         "got {:?}",
         outcome.changes
     );
+}
+
+#[test]
+fn a_few_stray_inline_runs_are_reported_rather_than_retagging_the_book() {
+    // One or two of these mean a couple of paragraphs need a <div>, not that
+    // the whole book is the wrong format. Changing a book's format identity on
+    // that evidence would be wildly out of proportion.
+    let (outcome, after) = roundtrip_full(&epub2(VERSE, "<p>x</p>"));
+
+    assert!(
+        entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#),
+        "must not retag on weak evidence"
+    );
+    let finding = outcome
+        .findings
+        .iter()
+        .find(|f| f.contains("too few to retag"))
+        .unwrap_or_else(|| panic!("expected a report, got {:?}", outcome.findings));
+    assert!(finding.contains("--migrate-epub3"), "{finding}");
+}
+
+#[test]
+fn enough_of_them_and_the_declaration_is_what_moves() {
+    // At scale the balance flips: repairing would mean hundreds of edits, so
+    // the one wrong attribute is overwhelmingly the likelier error.
+    let (outcome, after) = roundtrip_full(&epub2_ncx(&VERSE.repeat(8), "<p>x</p>", NESTED_NCX));
+
+    assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="3.0""#));
+    assert!(has(&after, "OEBPS/nav.xhtml"));
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("retagged") && c.contains("requires EPUB 3")),
+        "got {:?}",
+        outcome.changes
+    );
+    // The verse itself is untouched - only the declaration moved.
+    assert!(entry(&after, "OEBPS/ch1.xhtml").contains("<blockquote>"));
+    assert!(!entry(&after, "OEBPS/ch1.xhtml").contains("<div>"));
 }
 
 #[test]
@@ -162,39 +202,68 @@ fn a_genuinely_clean_epub3_book_comes_through_byte_identical() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_book_declaring_epub3_but_written_as_epub2_is_repaired_without_any_flag() {
-    // Changing a book's declared version is a policy choice and needs the flag.
-    // Making a book satisfy the version it *already declares* is ordinary work,
-    // and one of these errors — the undeclared entity — is fatal.
+fn a_book_declaring_epub3_but_written_as_epub2_is_downgraded() {
+    // Nothing here needs EPUB 3, and the book is EPUB 2 throughout. Moving the
+    // declaration down is one attribute; conforming it upward would mean
+    // rewriting every DOCTYPE, every entity, the metadata, and adding a file.
     let before = epub3_written_as_epub2("<p>Came loud&mdash;and hark, again!</p>");
     let (outcome, after) = roundtrip_full(&before);
     let opf = entry(&after, "OEBPS/content.opf");
     let ch1 = entry(&after, "OEBPS/ch1.xhtml");
 
-    assert!(ch1.contains("<!DOCTYPE html>"), "{ch1}");
+    assert!(opf.contains(r#"version="2.0""#), "{opf}");
     assert!(
-        ch1.contains("&#8212;"),
-        "the fatal entity is rewritten: {ch1}"
-    );
-    assert!(opf.contains("dcterms:modified"), "{opf}");
-    assert!(opf.contains(r#"properties="nav""#), "{opf}");
-    assert!(has(&after, "OEBPS/nav.xhtml"), "nav built from the NCX");
-    assert!(
-        opf.contains(r#"property="role""#),
-        "opf:role converted: {opf}"
-    );
-    assert!(!opf.contains("opf:role"), "{opf}");
-
-    // The version was already 3.0 and must not be reported as changed.
-    assert!(opf.contains(r#"version="3.0""#), "{opf}");
-    assert!(
-        !outcome
+        outcome
             .changes
             .iter()
-            .any(|c| c.contains("package version")),
-        "nothing to bump: {:?}",
+            .any(|c| c.contains("retagged") && c.contains("written as EPUB 2")),
+        "got {:?}",
         outcome.changes
     );
+
+    // The content is already right for EPUB 2, so none of it should move.
+    assert!(ch1.contains("XHTML 1.1"), "DOCTYPE kept: {ch1}");
+    assert!(ch1.contains("&mdash;"), "the entity is legal again: {ch1}");
+    assert!(
+        opf.contains("opf:role"),
+        "legacy metadata is legal again: {opf}"
+    );
+    assert!(!has(&after, "OEBPS/nav.xhtml"), "no nav needed in EPUB 2");
+}
+
+#[test]
+fn a_downgrade_strips_the_epub3_only_package_constructs() {
+    // These would be errors under an EPUB 2 declaration, so retagging has to
+    // take them with it.
+    let before = epub3_written_as_epub2("<p>plain</p>");
+    let (_, after) = roundtrip_full(&before);
+    let opf = entry(&after, "OEBPS/content.opf");
+
+    assert!(!opf.contains("dcterms:modified"), "{opf}");
+    assert!(!opf.contains("properties="), "{opf}");
+    assert!(
+        opf.contains(r#"toc="ncx""#),
+        "spine must point at the NCX: {opf}"
+    );
+}
+
+#[test]
+fn a_book_that_needs_epub3_is_never_downgraded_however_epub2_it_looks() {
+    // The two-sided test. This book has every EPUB 2 marker there is, but its
+    // verse only validates as HTML5, so downgrading would trade a handful of
+    // errors for a great many. It stays EPUB 3 and is repaired forward.
+    let before = epub3_written_as_epub2(&VERSE.repeat(8));
+    let (outcome, after) = roundtrip_full(&before);
+    let opf = entry(&after, "OEBPS/content.opf");
+
+    assert!(opf.contains(r#"version="3.0""#), "{opf}");
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("2.0")),
+        "no downgrade: {:?}",
+        outcome.changes
+    );
+    assert!(has(&after, "OEBPS/nav.xhtml"), "conformed forward instead");
+    assert!(entry(&after, "OEBPS/ch1.xhtml").contains("<!DOCTYPE html>"));
 }
 
 #[test]
@@ -219,14 +288,13 @@ fn conformance_repair_is_idempotent() {
 }
 
 #[test]
-fn conformance_never_downgrades_a_book() {
+fn keep_version_never_moves_the_declaration() {
     // A book declaring EPUB 3 stays EPUB 3 even when everything about it looks
     // like EPUB 2. Downgrading would be lossy and, for markup relying on HTML5
     // content models, would create far more errors than it removed.
-    let before = epub3_written_as_epub2(VERSE);
-    let (_, after) = roundtrip_full(&before);
+    let before = epub3_written_as_epub2("<p>plain prose</p>");
+    let (_, after) = common::roundtrip_kept(&before);
     assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="3.0""#));
-    assert!(!entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#));
 }
 
 #[test]

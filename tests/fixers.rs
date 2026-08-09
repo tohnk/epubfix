@@ -119,7 +119,7 @@ fn invalid_ids_are_sanitised_and_links_follow() {
 #[test]
 fn valid_ids_are_left_alone() {
     let ch1 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
-  <h1 id="intro">One</h1><a name="_x-1.2">ok</a><p id="">empty</p>
+  <h1 id="intro">One</h1><p><a name="_x-1.2">ok</a></p><p id="">empty</p>
 </body></html>"#;
     let (changes, _) = roundtrip(&make_text_epub(&with(clean_book(), "OEBPS/ch1.xhtml", ch1)));
     assert!(changes.is_empty(), "got {changes:?}");
