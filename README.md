@@ -423,6 +423,13 @@ to 0) and EPUB 3 (20 errors to 0); a Coleridge-shaped EPUB 2 book with verse in
 uncaptioned images goes from 24 errors to 0, and a book declaring EPUB 3 while written as EPUB 2
 goes from 1 fatal + 11 errors to 0 by being retagged downward.
 
+A book carrying every defect from the second sweep at once — duplicated Kobo
+ids, `data-AmznRemoved`, a paragraph that swallowed a `<blockquote>`, a nested
+`<a>`, a content document with no XHTML namespace, a `guide` pointing at a JPEG,
+and an `@font-face` whose path doubles the directory — goes from 12 errors to 0
+in one pass, and to 0 again under both `--preserve-presentation` and
+`--migrate-epub3`.
+
 In the other direction, a book carrying every shape that used to trigger a false
 positive — six filenames with apostrophes, exclamation marks, parentheses,
 accented Latin and CJK; a `<pageList>` with neither attribute; and three
