@@ -7,6 +7,7 @@
 //! See [`fixers`] for how to add a new repair.
 
 pub mod book;
+pub mod css;
 pub mod entities;
 pub mod fixers;
 pub mod markup;
@@ -22,6 +23,7 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 pub use book::Book;
+pub use fixers::tables::Presentation;
 pub use fixers::{Fixer, Outcome};
 
 #[derive(Debug)]
@@ -80,6 +82,8 @@ pub struct Options {
     pub migrate_epub3: bool,
     /// Never change the declared version, only repair against it.
     pub keep_version: bool,
+    /// What to do with presentational attributes the ruleset rejects.
+    pub presentation: Presentation,
 }
 
 impl Default for Options {
@@ -90,13 +94,14 @@ impl Default for Options {
             only: Vec::new(),
             migrate_epub3: false,
             keep_version: false,
+            presentation: Presentation::Strip,
         }
     }
 }
 
 /// Run every fixer over `book`.
 pub fn fix_book(book: &mut Book) -> Outcome {
-    fix_book_with(book, &fixers::all())
+    fix_book_with(book, &fixers::all(&Options::default()))
 }
 
 /// Convert `book` to EPUB 3, but only if the result preserves everything.
@@ -211,9 +216,9 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
     let mut book = Book::load(File::open(path)?)?;
 
     let selected: Vec<Box<dyn Fixer>> = if opts.only.is_empty() {
-        fixers::all()
+        fixers::all(opts)
     } else {
-        fixers::all()
+        fixers::all(opts)
             .into_iter()
             .filter(|f| opts.only.iter().any(|n| n == f.name()))
             .collect()

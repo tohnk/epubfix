@@ -333,3 +333,117 @@ fn everything_at_once_stays_idempotent() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// --preserve-presentation, and the CSS-override report
+// ---------------------------------------------------------------------------
+
+/// Run with `--preserve-presentation` instead of the default strip.
+fn fix_preserving(before: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
+    let opts = epubfix::Options {
+        presentation: epubfix::Presentation::Preserve,
+        ..epubfix::Options::default()
+    };
+    common::roundtrip_with(before, &opts)
+}
+
+#[test]
+fn preserve_presentation_converts_attributes_to_inline_style() {
+    let (outcome, after) = fix_preserving(&epub3(TABLE, "<p>x</p>"));
+    let doc = ch1(&after);
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("converted to inline style")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!doc.contains("valign="), "the attribute still goes: {doc}");
+    assert!(doc.contains("vertical-align: top"), "{doc}");
+    assert!(doc.contains("text-align: left"), "{doc}");
+    assert!(
+        doc.contains("width: 50%"),
+        "a percentage passes through: {doc}"
+    );
+    assert!(doc.contains("white-space: nowrap"), "{doc}");
+}
+
+#[test]
+fn preserve_presentation_reports_what_it_could_not_convert() {
+    // cellpadding describes the cells, not the table, so there is no
+    // single-property CSS equivalent to write on the element carrying it.
+    let (outcome, _) = fix_preserving(&epub3(TABLE, "<p>x</p>"));
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("no single-property CSS equivalent") && f.contains("cellpadding")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+#[test]
+fn preserve_presentation_appends_to_an_existing_style_attribute() {
+    let body = r#"<table><tr><td style="color: red" valign="top">cell</td></tr></table>"#;
+    let (_, after) = fix_preserving(&epub3(body, "<p>x</p>"));
+    let doc = ch1(&after);
+    assert!(
+        doc.contains(r#"style="color: red; vertical-align: top""#),
+        "{doc}"
+    );
+}
+
+#[test]
+fn preserve_presentation_floats_an_aligned_image_rather_than_centring_its_text() {
+    // `align` means different things on different elements, and getting that
+    // wrong would move the picture rather than leave it be.
+    let body = r#"<p><img src="x.jpg" alt="x" align="left" hspace="8"/></p>"#;
+    let (_, after) = fix_preserving(&epub3(body, "<p>y</p>"));
+    let doc = ch1(&after);
+    assert!(doc.contains("float: left"), "{doc}");
+    assert!(doc.contains("margin-left: 8px; margin-right: 8px"), "{doc}");
+    assert!(!doc.contains("text-align"), "{doc}");
+}
+
+#[test]
+fn stripping_reports_only_the_attributes_no_stylesheet_was_overriding() {
+    // The Calibre case: a generated stylesheet already sets vertical-align on
+    // the rows, so those attributes had been doing nothing for years and
+    // removing them cannot change the page. `nowrap` has no such rule.
+    let body = r#"<table class="calibre1">
+  <tr class="calibre7" valign="top"><td class="calibre8" nowrap="nowrap">cell</td></tr>
+</table>"#;
+    let css = ".calibre7 { vertical-align: middle }\n.calibre8 { vertical-align: inherit }\n";
+    let before = common::epub3_with_css(body, css);
+    let (outcome, _) = fix(&before);
+
+    let finding = outcome
+        .findings
+        .iter()
+        .find(|f| f.contains("not already overridden"))
+        .unwrap_or_else(|| panic!("expected a report, got {:?}", outcome.findings));
+    assert!(finding.contains("nowrapx1"), "{finding}");
+    assert!(
+        !finding.contains("valign"),
+        "valign was overridden: {finding}"
+    );
+}
+
+#[test]
+fn a_book_whose_stylesheet_covers_everything_draws_no_report() {
+    let body =
+        r#"<table class="t"><tr class="r" valign="top"><td class="c">cell</td></tr></table>"#;
+    let css = ".r { vertical-align: middle }\n";
+    let (outcome, _) = fix(&common::epub3_with_css(body, css));
+    assert!(
+        !outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("not already overridden")),
+        "got {:?}",
+        outcome.findings
+    );
+}

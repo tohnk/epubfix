@@ -232,6 +232,49 @@ pub fn epub2(ch1_body: &str, ch2_body: &str) -> Vec<u8> {
     build(false, ch1_body, ch2_body)
 }
 
+/// As [`roundtrip_full`], but with non-default options — the presentation
+/// mode, in practice.
+pub fn roundtrip_with(
+    bytes: &[u8],
+    opts: &epubfix::Options,
+) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
+    let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
+    let mut outcome = epubfix::retag_book(&mut book);
+    outcome.merge(epubfix::fix_book_with(
+        &mut book,
+        &epubfix::fixers::all(opts),
+    ));
+    let mut out = Cursor::new(Vec::new());
+    book.save(&mut out).unwrap();
+    (outcome, read_epub(&out.into_inner()))
+}
+
+/// An EPUB 3 book whose chapter links a stylesheet, for the CSS-override
+/// report: whether stripping an attribute is visible depends on what the
+/// book's own styles already say.
+pub fn epub3_with_css(ch1_body: &str, css: &str) -> Vec<u8> {
+    let opf = opf3().replace(
+        r#"    <item id="ch1""#,
+        concat!(
+            r#"    <item id="css" href="s.css" media-type="text/css"/>"#,
+            "\n",
+            r#"    <item id="ch1""#
+        ),
+    );
+    let ch1 = chapter(ch1_body, true).replace(
+        "</head>",
+        r#"<link rel="stylesheet" type="text/css" href="s.css"/></head>"#,
+    );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/nav.xhtml", NAV3.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/ch2.xhtml", chapter("<p>x</p>", true).as_bytes()),
+        ("OEBPS/s.css", css.as_bytes()),
+    ])
+}
+
 /// The same book declared as EPUB 3, so version-gated fixers can be compared.
 pub fn epub3(ch1_body: &str, ch2_body: &str) -> Vec<u8> {
     build(true, ch1_body, ch2_body)
@@ -248,6 +291,43 @@ pub fn epub2_ncx(ch1_body: &str, ch2_body: &str, ncx: &str) -> Vec<u8> {
         ("OEBPS/ch1.xhtml", ch1.as_bytes()),
         ("OEBPS/ch2.xhtml", ch2.as_bytes()),
         ("OEBPS/toc.ncx", ncx.as_bytes()),
+    ])
+}
+
+/// An EPUB 2 book with a caller-supplied NCX and OPF `guide`, for landmarks.
+pub fn epub2_ncx_guide(ch1_body: &str, ch2_body: &str, ncx: &str, guide: &str) -> Vec<u8> {
+    let opf = opf2().replace("</package>", &format!("{guide}</package>"));
+    let opf = opf.replace(
+        "  <spine",
+        concat!(
+            r#"    <item id="cov" href="cover.jpg" media-type="image/jpeg"/>"#,
+            "\n  <spine"
+        ),
+    );
+    // The manifest line above lands inside <manifest>, which closes just before
+    // the spine; putting it there keeps the guide's image reference resolvable.
+    let opf = opf.replace(
+        concat!(
+            r#"    <item id="cov" href="cover.jpg" media-type="image/jpeg"/>"#,
+            "\n  <spine"
+        ),
+        concat!(
+            r#"    <item id="cov" href="cover.jpg" media-type="image/jpeg"/>"#,
+            "\n  </manifest>\n  <spine"
+        ),
+    );
+    let opf = opf.replacen(
+        "  </manifest>\n    <item id=\"cov\"",
+        "    <item id=\"cov\"",
+        1,
+    );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", chapter(ch1_body, false).as_bytes()),
+        ("OEBPS/ch2.xhtml", chapter(ch2_body, false).as_bytes()),
+        ("OEBPS/toc.ncx", ncx.as_bytes()),
+        ("OEBPS/cover.jpg", &[0xFF, 0xD8, 0xFF, 0xE0]),
     ])
 }
 

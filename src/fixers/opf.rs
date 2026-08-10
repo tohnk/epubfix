@@ -6,7 +6,9 @@ use regex::Regex;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::util::re;
+use crate::markup::{Edits, scan};
+use crate::refs::resolve_href;
+use crate::util::{ends_with_any, re};
 
 /// Read the OPF, hand it to `f`, and store the result if it changed.
 fn edit_opf(book: &mut Book, f: impl FnOnce(&str) -> String) -> bool {
@@ -99,5 +101,72 @@ impl Fixer for FontMediaType {
         } else {
             Outcome::none()
         }
+    }
+}
+
+/// OPF-032: `Guide references "…" which is not a valid "OPS Content Document"`.
+///
+/// The `guide` is the EPUB 2 predecessor of the landmarks nav, and every
+/// `<reference>` in it is required to point at a content document. Conversion
+/// tools sometimes point one at the cover *image* instead of the cover page —
+/// one real book has three `.jpg` references. A reading system cannot navigate
+/// to a JPEG, so the entry does nothing but fail validation.
+///
+/// Only references that resolve to something which is not markup are removed.
+/// A reference to a missing file is a different defect with a different repair
+/// and is left to [`crate::fixers::resources::DanglingResources`]; a reference
+/// whose fragment does not exist is left to `BrokenFragments`. Both of those
+/// can recover the link, and deleting it first would take the chance away.
+pub struct GuideReferences;
+
+impl Fixer for GuideReferences {
+    fn name(&self) -> &'static str {
+        "guide-references"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["OPF-032"]
+    }
+    fn description(&self) -> &'static str {
+        "drop guide entries pointing at something that is not a content document"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+
+        let present: Vec<String> = book.names().to_vec();
+        let mut edits = Edits::new();
+        let mut dropped = 0u32;
+
+        for node in nodes.iter().filter(|n| n.name == "reference") {
+            let Some(href) = node.attr("href") else {
+                continue;
+            };
+            let Some((target, _)) = resolve_href(&opf_name, &href.value) else {
+                continue;
+            };
+            // A target that is not in the book at all is somebody else's
+            // problem, and one that is markup is doing its job.
+            if !present.contains(&target) || ends_with_any(&target, crate::util::MARKUP) {
+                continue;
+            }
+            edits.delete(node.element_span(&nodes));
+            dropped += 1;
+        }
+
+        if dropped == 0 {
+            return Outcome::none();
+        }
+        book.set_text(&opf_name, edits.apply(&text));
+        Outcome::change(format!(
+            "removed {dropped} guide reference(s) pointing at a non-content file"
+        ))
     }
 }

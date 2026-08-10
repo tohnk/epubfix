@@ -23,7 +23,7 @@ use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
 use crate::markup::{Edits, id_attrs, scan};
 use crate::refs::resolve_href;
-use crate::util::{is_bad_id, re, sanitise_id};
+use crate::util::{basename, is_bad_id, re, sanitise_id};
 
 /// An `href`/`src` attribute value, captured so its span can be edited.
 static HREF_RE: LazyLock<Regex> =
@@ -146,6 +146,85 @@ impl Fixer for XmlIds {
         }
 
         outcome.push_change(format!("sanitised {} id(s)", renames.len()));
+        outcome
+    }
+}
+
+/// RSC-005: `Duplicate ID "x"` — the same id twice in one content document.
+///
+/// Kobo injects reading-location spans and does not check them against what is
+/// already there; one chapter of a real book had twelve copies of
+/// `id="kobo.40.N"`. [`crate::fixers::ncx::NcxDuplicateIds`] does the same job
+/// for the NCX, and this is the same logic pointed at the content documents,
+/// with one extra worry: in a content document an id is very often a live link
+/// target, and renaming the one somebody links to breaks the link.
+///
+/// So the *first* occurrence always keeps the name, and after that any
+/// duplicate that something references is reported rather than renamed. That
+/// leaves an error behind on purpose. A book where two referenced elements
+/// share an id has already lost the information about which link meant which,
+/// and no amount of renaming recovers it.
+pub struct ContentDuplicateIds;
+
+impl Fixer for ContentDuplicateIds {
+    fn name(&self) -> &'static str {
+        "content-duplicate-ids"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "make duplicated ids in a content document unique, leaving referenced ones alone"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let mut outcome = Outcome::none();
+        let index = book.reference_index();
+        let mut renamed = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+
+            let mut taken: HashSet<String> = nodes
+                .iter()
+                .flat_map(id_attrs)
+                .map(|a| a.value.clone())
+                .collect();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut edits = Edits::new();
+
+            for attr in nodes.iter().flat_map(id_attrs) {
+                // The first one keeps the name, so every link that resolves
+                // today still resolves to the same element afterwards.
+                if seen.insert(attr.value.clone()) {
+                    continue;
+                }
+                if index.is_referenced(&doc, &attr.value) {
+                    outcome.push_finding(format!(
+                        "{}: id \"{}\" appears more than once and something links to it, so \
+                         the duplicate was left alone",
+                        basename(&doc),
+                        attr.value
+                    ));
+                    continue;
+                }
+                let new = unique_id(&attr.value, &taken);
+                taken.insert(new.clone());
+                edits.replace(attr.span.clone(), format!("{}=\"{new}\"", attr.name));
+                renamed += 1;
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if renamed > 0 {
+            outcome.push_change(format!("made {renamed} duplicated id(s) unique"));
+        }
         outcome
     }
 }

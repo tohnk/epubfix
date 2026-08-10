@@ -32,11 +32,17 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `opf-version` | OPF-001 | `<package version="1.0">` (OEBPS 1.0) → `"2.0"` |
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
 | `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
+| `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
+| `content-duplicate-ids` | RSC-005 | makes duplicated ids in a content document unique, keeping the first and leaving referenced ones alone |
+| `data-attributes` | HTM_061 | removes custom data attributes whose names HTML5 rejects (Kindle's `data-AmznRemoved`) |
 | `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
 | `img-alt` | RSC-005 | adds `alt=""` to decorative images in EPUB 2, and reports the rest rather than inventing captions |
+| `nested-anchors` | RSC-005 | unwraps an `<a>` nested inside another, keeping its text and rehoming any id on a `<span>` |
+| `misplaced-blockquotes` | RSC-005 | splits a paragraph around a `<blockquote>` it swallowed, or demotes the quotation to a `<span>` |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
-| `dangling-resources` | RSC-007 | repoints references whose file moved, and drops dead stylesheet/script includes — never an `<img>` or `<a>` |
+| `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
+| `dangling-resources` | RSC-007 | repoints references whose file moved — in stylesheets as well as markup — and drops dead stylesheet/script includes, never an `<img>` or `<a>` |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-duplicate-ids` | RSC-005 | makes duplicated NCX ids unique, leaving any that are referenced alone |
@@ -50,7 +56,12 @@ Done: 1 fixed, 1 already clean, 0 failed.
 
 ### EPUB 2 and EPUB 3 are not the same job
 
-`legacy-table-attrs` reads the OPF `<package version>` and behaves differently,
+Four fixers read the OPF `<package version>` and behave differently either side
+of it. `img-alt` and `version-mismatch` are EPUB 2 only. `data-attributes`
+removes malformed names in both, but under XHTML 1.1 *every* `data-*` attribute
+is an error — valid name or not — and deleting the well-formed ones would be
+data loss to satisfy a declaration that is very likely the thing at fault, so
+those are reported instead. And `legacy-table-attrs` differs most of all,
 because the two rulesets genuinely differ:
 
 * **EPUB 3** content documents are validated as HTML5, which removed the whole
@@ -64,6 +75,26 @@ because the two rulesets genuinely differ:
 Stripping attributes that EPUB 2 permits would change how those books render for
 no validation benefit, so it does not. The split was **measured against EPUB
 Check 5.2.1**, not read off a specification, and `tests/content.rs` pins it.
+
+Stripping the rest is not automatically invisible either. A presentational
+attribute contributes at the presentational-hints origin, *below* author
+stylesheets: if a rule already sets the property the attribute has been doing
+nothing for years and removing it cannot change the page, and if none does,
+removing it falls back to the user-agent default. So the default run scans the
+book's own stylesheets for a rule matching the element's name or classes and
+reports the difference — "4 of those 12 attributes were not already overridden
+by a stylesheet rule". In the Calibre books this was built for, the generated
+stylesheet covers all of them and the report stays quiet.
+
+`--preserve-presentation` converts instead of removing: `valign="top"` becomes
+`vertical-align: top` in the element's `style`, `align="left"` on an image
+becomes `float: left` rather than `text-align`, and `cellpadding` — which has
+no single-property equivalent, since it describes the cells — is removed and
+reported. **This is not the safer option.** An inline style sits *above* author
+rules where the attribute sat below them, so on a book whose stylesheet already
+sets `vertical-align: middle`, converting 693 `valign="top"` attributes changes
+the rendering that stripping them leaves alone. It is the right choice only for
+a book with no stylesheet worth the name.
 
 The same version split decides how `misplaced-anchors` repairs things. Moving a
 stranded `<a>` to just after `</table>` is valid in EPUB 3, but in EPUB 2 an
@@ -193,6 +224,7 @@ HTML5 rules, and `img-alt` stops applying at all.
 epubfix --dry-run -r ~/Books        # what would move, and why
 epubfix --keep-version book.epub    # repair, but never touch the declaration
 epubfix --migrate-epub3 book.epub   # force EPUB 3 even if unnecessary
+epubfix --preserve-presentation .   # legacy table attributes -> inline CSS
 ```
 
 ## Usage
@@ -205,6 +237,9 @@ epubfix [OPTIONS] [FILE_OR_DIR ...]
 -r, --recursive     descend into subdirectories when scanning a folder
     --keep-version  never change a book's declared EPUB version
     --migrate-epub3 force an upgrade to EPUB 3 even if unnecessary
+    --preserve-presentation
+                    convert legacy table attributes to inline CSS
+                    instead of removing them
     --only NAMES    run only these fixers (comma-separated, see --list)
 -l, --list          list the available fixers and exit
     --pause         wait for Enter before exiting

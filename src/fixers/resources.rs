@@ -5,12 +5,21 @@
 //! defect, because nobody checks a link that looks fixed.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
 use crate::markup::{Attr, Edits, Node, id_attrs, scan};
 use crate::refs::resolve_href;
-use crate::util::{basename, ends_with_any};
+use crate::util::{basename, ends_with_any, re};
+
+/// The argument of a CSS `url(...)`, with its quotes if it has any.
+///
+/// `data:` and absolute URLs are filtered out later by `resolve_href`, which
+/// already knows what is not a container-relative path.
+static CSS_URL_RE: LazyLock<Regex> = LazyLock::new(|| re(r"url\(\s*([^)]*?)\s*\)"));
 
 /// Attributes that name another resource.
 ///
@@ -122,6 +131,47 @@ impl Fixer for DanglingResources {
 
             if !edits.is_empty() {
                 book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        // Stylesheets reference resources too, and nothing above sees them: a
+        // scanner that only reads markup never opens a .css file. One real book
+        // has an @font-face whose path doubles the directory —
+        // OEBPS/Styles/OEBPS/Fonts/… — which epubcheck reports as RSC-007
+        // against the stylesheet, and which the same unique-basename rule
+        // repoints correctly.
+        for name in book.names().to_vec() {
+            if !ends_with_any(&name, &[".css"]) {
+                continue;
+            }
+            let Some(css) = book.text(&name).map(str::to_owned) else {
+                continue;
+            };
+            let mut edits = Edits::new();
+            for m in CSS_URL_RE.captures_iter(&css) {
+                let value = m.get(1).expect("group 1 always matches");
+                let raw = value.as_str().trim().trim_matches(['"', '\'']);
+                let Some((target, _)) = resolve_href(&name, raw) else {
+                    continue;
+                };
+                if present.contains(&target) {
+                    continue;
+                }
+                let matches = by_basename
+                    .get(&basename(&target).to_ascii_lowercase())
+                    .map_or(&[][..], Vec::as_slice);
+                if let [only] = matches {
+                    edits.replace(value.range(), format!("\"{}\"", relative_to(&name, only)));
+                    repointed += 1;
+                } else {
+                    outcome.push_finding(format!(
+                        "{}: url({raw}) is not in the book and has no match anywhere",
+                        basename(&name)
+                    ));
+                }
+            }
+            if !edits.is_empty() {
+                book.set_text(&name, edits.apply(&css));
             }
         }
 

@@ -53,6 +53,20 @@ pub struct Attr {
     pub span_with_space: Range<usize>,
 }
 
+impl Attr {
+    /// The name exactly as the source spells it, case and all.
+    ///
+    /// [`Attr::name`] is lowercased so matching does not have to think about
+    /// case, which is right almost everywhere and wrong in one place: whether a
+    /// custom data attribute is *valid* turns on whether its name contains an
+    /// ASCII uppercase letter, and by then the lowercased copy has thrown that
+    /// away. Lowercasing preserves byte length, so the raw name is the same
+    /// number of bytes from the start of the span.
+    pub fn raw_name<'a>(&self, src: &'a str) -> &'a str {
+        &src[self.span.start..self.span.start + self.name.len()]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub kind: NodeKind,

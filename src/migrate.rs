@@ -266,6 +266,137 @@ fn render_list(items: &[NavItem], depth: usize) -> String {
     out
 }
 
+/// The EPUB 3 structural-semantics term for an EPUB 2 `guide` reference type.
+///
+/// Both spellings validate — measured, with all seventeen guide types in one
+/// landmarks nav and then again unmapped, and epubcheck was silent either way.
+/// The mapping is still worth doing, because a reading system looking for the
+/// start of the book matches `bodymatter`, not `text`, and a landmarks nav
+/// nothing can read is only decorative.
+fn landmark_type(guide_type: &str) -> &str {
+    match guide_type {
+        "title-page" => "titlepage",
+        "acknowledgements" => "acknowledgments",
+        "notes" => "endnotes",
+        "text" => "bodymatter",
+        other => other,
+    }
+}
+
+/// Landmarks entries built from the OPF `guide`.
+///
+/// The `guide` is the EPUB 2 spelling of landmarks and stays legal in EPUB 3,
+/// so this adds the modern form rather than replacing it. Entries pointing at
+/// something that is not a content document are skipped: they are already an
+/// OPF-032 error where they stand, and copying one into the nav would move the
+/// error rather than fix it.
+fn collect_landmarks(book: &Book, opf_name: &str, nav_doc: &str) -> Vec<(String, NavItem)> {
+    let Some(opf_src) = book.opf_text() else {
+        return Vec::new();
+    };
+    let Ok(nodes) = scan(opf_src) else {
+        return Vec::new();
+    };
+    let present: Vec<String> = book.names().to_vec();
+
+    nodes
+        .iter()
+        .filter(|n| n.name == "reference" && n.kind != NodeKind::End)
+        .filter_map(|n| {
+            let href = n.attr("href")?;
+            let kind = n.attr("type").map_or("bodymatter", |a| a.value.as_str());
+            let (target, _) = resolve_href(opf_name, &href.value)?;
+            if !present.contains(&target)
+                || !crate::util::ends_with_any(&target, crate::util::MARKUP)
+            {
+                return None;
+            }
+            let label = n
+                .attr("title")
+                .map_or_else(|| kind.to_string(), |a| a.value.clone());
+            Some((
+                landmark_type(kind).to_string(),
+                NavItem {
+                    label,
+                    href: rebase(opf_name, nav_doc, &href.value),
+                    children: Vec::new(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Render the landmarks list. Each anchor needs an `epub:type`, which epubcheck
+/// enforces, and an empty `<ol>` is itself an error — so the caller must not
+/// call this with nothing.
+fn render_landmarks(items: &[(String, NavItem)]) -> String {
+    let mut out = String::from("    <ol>\n");
+    for (kind, item) in items {
+        let label = if item.label.is_empty() {
+            kind.as_str()
+        } else {
+            &item.label
+        };
+        let _ = writeln!(
+            out,
+            "      <li><a epub:type=\"{kind}\" href=\"{}\">{label}</a></li>",
+            item.href
+        );
+    }
+    out.push_str("    </ol>\n");
+    out
+}
+
+/// Assemble the nav document itself.
+fn nav_document(
+    title: &str,
+    toc: &[NavItem],
+    pages: &[NavItem],
+    landmarks: &[(String, NavItem)],
+) -> String {
+    let mut body = format!(
+        "  <nav epub:type=\"toc\" id=\"toc\">\n    <h1>Contents</h1>\n{}  </nav>\n",
+        render_list(toc, 0)
+    );
+    if !pages.is_empty() {
+        let _ = write!(
+            body,
+            "  <nav epub:type=\"page-list\" id=\"page-list\" hidden=\"hidden\">\n\
+             \x20   <h1>Pages</h1>\n{}  </nav>\n",
+            render_list(pages, 0)
+        );
+    }
+    // An empty <ol> is itself an error, so a book with no guide gets no
+    // landmarks section at all rather than a blank one.
+    if !landmarks.is_empty() {
+        let _ = write!(
+            body,
+            "  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"hidden\">\n\
+             \x20   <h1>Landmarks</h1>\n{}  </nav>\n",
+            render_landmarks(landmarks)
+        );
+    }
+
+    // The NCX declares the HTML 4 entity set; the nav document will not.
+    let body = ENTITY_RE.replace_all(&body, |c: &regex::Captures| {
+        let name = &c[1];
+        if matches!(name, "amp" | "lt" | "gt" | "quot" | "apos") {
+            c[0].to_string()
+        } else {
+            entities::lookup(name).map_or_else(|| c[0].to_string(), |cp| format!("&#{cp};"))
+        }
+    });
+
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <!DOCTYPE html>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\" \
+         xmlns:epub=\"http://www.idpf.org/2007/ops\">\n\
+         <head>\n  <title>{title}</title>\n  <meta charset=\"utf-8\"/>\n</head>\n\
+         <body>\n{body}</body>\n</html>\n"
+    )
+}
+
 /// Build a nav document from the NCX. Returns its archive name.
 fn build_nav(book: &mut Book, opf_name: &str, outcome: &mut Outcome) -> Option<String> {
     // A book that already declares a nav needs nothing here.
@@ -322,47 +453,23 @@ fn build_nav(book: &mut Book, opf_name: &str, outcome: &mut Outcome) -> Option<S
             |t| inner_source(&ncx_src, &nodes, t).trim().to_string(),
         );
 
-    let mut body = format!(
-        "  <nav epub:type=\"toc\" id=\"toc\">\n    <h1>Contents</h1>\n{}  </nav>\n",
-        render_list(&toc, 0)
-    );
-    if !pages.is_empty() {
-        let _ = write!(
-            body,
-            "  <nav epub:type=\"page-list\" id=\"page-list\" hidden=\"hidden\">\n\
-             \x20   <h1>Pages</h1>\n{}  </nav>\n",
-            render_list(&pages, 0)
-        );
-    }
-
-    // The NCX declares the HTML 4 entity set; the nav document will not.
-    let body = ENTITY_RE.replace_all(&body, |c: &regex::Captures| {
-        let name = &c[1];
-        if matches!(name, "amp" | "lt" | "gt" | "quot" | "apos") {
-            c[0].to_string()
-        } else {
-            entities::lookup(name).map_or_else(|| c[0].to_string(), |cp| format!("&#{cp};"))
-        }
-    });
-
-    let doc = format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
-         <!DOCTYPE html>\n\
-         <html xmlns=\"http://www.w3.org/1999/xhtml\" \
-         xmlns:epub=\"http://www.idpf.org/2007/ops\">\n\
-         <head>\n  <title>{title}</title>\n  <meta charset=\"utf-8\"/>\n</head>\n\
-         <body>\n{body}</body>\n</html>\n"
-    );
-
-    book.add_text_entry(&nav_doc, doc);
+    let landmarks = collect_landmarks(book, opf_name, &nav_doc);
+    book.add_text_entry(&nav_doc, nav_document(&title, &toc, &pages, &landmarks));
     outcome.push_change(format!(
         "generated {} from the NCX ({} entries{})",
         basename(&nav_doc),
         toc.len(),
-        if pages.is_empty() {
-            String::new()
-        } else {
-            format!(", {} page targets", pages.len())
+        {
+            let mut extra = String::new();
+            for (n, what) in [
+                (pages.len(), "page targets"),
+                (landmarks.len(), "landmarks"),
+            ] {
+                if n > 0 {
+                    let _ = write!(extra, ", {n} {what}");
+                }
+            }
+            extra
         }
     ));
     Some(nav_doc)

@@ -494,7 +494,7 @@ fn only_runs_the_selected_fixers() {
     let files = with(clean_book(), "OEBPS/toc.ncx", ncx);
 
     let mut book = Book::load(Cursor::new(make_text_epub(&files))).unwrap();
-    let selected: Vec<Box<dyn epubfix::Fixer>> = fixers::all()
+    let selected: Vec<Box<dyn epubfix::Fixer>> = fixers::all(&epubfix::Options::default())
         .into_iter()
         .filter(|f| f.name() == "ncx-uid")
         .collect();
@@ -509,7 +509,7 @@ fn only_runs_the_selected_fixers() {
 
 #[test]
 fn every_fixer_has_a_unique_name_and_a_code() {
-    let all = epubfix::fixers::all();
+    let all = epubfix::fixers::all(&epubfix::Options::default());
     let mut seen = std::collections::HashSet::new();
     for f in &all {
         assert!(seen.insert(f.name()), "duplicate fixer name {}", f.name());

@@ -26,6 +26,9 @@ OPTIONS:
     -r, --recursive     descend into subdirectories when scanning a folder
         --migrate-epub3 force an upgrade to EPUB 3 even if unnecessary
         --keep-version  never change a book's declared EPUB version
+        --preserve-presentation
+                        convert legacy table attributes to inline CSS
+                        instead of removing them
         --only NAMES    run only these fixers (comma-separated, see --list)
     -l, --list          list the available fixers and exit
         --pause         wait for Enter before exiting
@@ -97,6 +100,9 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
             "-r" | "--recursive" => parsed.recursive = true,
             "--migrate-epub3" => parsed.opts.migrate_epub3 = true,
             "--keep-version" => parsed.opts.keep_version = true,
+            "--preserve-presentation" => {
+                parsed.opts.presentation = epubfix::Presentation::Preserve;
+            }
             "--pause" => parsed.pause = Some(true),
             "--no-pause" => parsed.pause = Some(false),
             "-l" | "--list" => {
@@ -122,7 +128,10 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
         }
     }
 
-    let known: Vec<&str> = fixers::all().iter().map(|f| f.name()).collect();
+    let known: Vec<&str> = fixers::all(&Options::default())
+        .iter()
+        .map(|f| f.name())
+        .collect();
     if let Some(bad) = parsed
         .opts
         .only
@@ -144,7 +153,7 @@ fn split_names(v: &str) -> Vec<String> {
 }
 
 fn list_fixers() {
-    let all = fixers::all();
+    let all = fixers::all(&Options::default());
     let width = all.iter().map(|f| f.name().len()).max().unwrap_or(0);
     println!("Available fixers:\n");
     for f in &all {

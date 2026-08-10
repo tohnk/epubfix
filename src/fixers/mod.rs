@@ -19,10 +19,12 @@
 use crate::book::Book;
 
 pub mod anchors;
+pub mod attrs;
 pub mod filenames;
 pub mod ids;
 pub mod legacy_html;
 pub mod ncx;
+pub mod nesting;
 pub mod opf;
 pub mod resources;
 pub mod tables;
@@ -101,15 +103,27 @@ pub trait Fixer {
 /// internal links runs *before* `filenames`, which renames the resources those
 /// links point at. Reversing that would leave the reference index resolving
 /// hrefs against names no longer in the archive.
-pub fn all() -> Vec<Box<dyn Fixer>> {
+pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
     vec![
         Box::new(opf::PackageVersion),
         Box::new(opf::SpinePageMap),
         Box::new(opf::FontMediaType),
+        Box::new(attrs::XhtmlNamespace),
         Box::new(ids::XmlIds),
-        Box::new(tables::LegacyTableAttrs),
+        // After xml-ids, so a sanitised id that collided with an existing one
+        // is seen as the duplicate it now is.
+        Box::new(ids::ContentDuplicateIds),
+        Box::new(attrs::DataAttributes),
+        Box::new(tables::LegacyTableAttrs {
+            mode: opts.presentation,
+        }),
         Box::new(legacy_html::ImgAlt),
+        Box::new(nesting::NestedAnchors),
+        Box::new(nesting::MisplacedBlockquotes),
         Box::new(anchors::MisplacedAnchors),
+        // Before dangling-resources, which can recover a link this would only
+        // delete.
+        Box::new(opf::GuideReferences),
         Box::new(resources::DanglingResources),
         Box::new(resources::BrokenFragments),
         // Before the renumbering, which closes the gaps removal leaves behind.

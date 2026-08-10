@@ -592,3 +592,64 @@ fn an_element_that_really_is_illegal_in_epub2_still_triggers_an_upgrade() {
     );
     assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="3.0""#));
 }
+
+/// The `guide` is the EPUB 2 spelling of landmarks. Migration adds the modern
+/// form alongside it rather than replacing it — `guide` stays legal in EPUB 3.
+#[test]
+fn the_opf_guide_becomes_a_landmarks_nav() {
+    let guide = r#"  <guide>
+    <reference type="cover" title="Cover" href="ch1.xhtml"/>
+    <reference type="text" title="Begin Reading" href="ch2.xhtml"/>
+    <reference type="title-page" title="Title" href="ch1.xhtml"/>
+  </guide>
+"#;
+    let before = common::epub2_ncx_guide(VERSE, "<p>x</p>", NESTED_NCX, guide);
+    let (outcome, after) = migrate(&before);
+    let nav = entry(&after, "OEBPS/nav.xhtml");
+
+    assert!(nav.contains(r#"epub:type="landmarks""#), "{nav}");
+    // epubcheck requires an epub:type on every landmarks anchor.
+    assert!(
+        nav.contains(r#"<a epub:type="cover" href="ch1.xhtml">Cover</a>"#),
+        "{nav}"
+    );
+    // Guide types that have a different EPUB 3 spelling are translated, so a
+    // reading system looking for the start of the book actually finds it.
+    assert!(
+        nav.contains(r#"epub:type="bodymatter" href="ch2.xhtml">Begin Reading"#),
+        "text -> bodymatter: {nav}"
+    );
+    assert!(nav.contains(r#"epub:type="titlepage""#), "{nav}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("3 landmarks")),
+        "got {:?}",
+        outcome.changes
+    );
+    // The guide itself is untouched: still valid, and EPUB 2 readers use it.
+    assert!(entry(&after, "OEBPS/content.opf").contains("<guide>"));
+}
+
+#[test]
+fn a_guide_entry_pointing_at_an_image_never_reaches_the_landmarks_nav() {
+    // It is an OPF-032 error where it stands; copying it into the nav would
+    // move the error rather than fix it.
+    let guide = r#"  <guide>
+    <reference type="cover" title="Cover" href="cover.jpg"/>
+    <reference type="text" title="Text" href="ch1.xhtml"/>
+  </guide>
+"#;
+    let before = common::epub2_ncx_guide(VERSE, "<p>x</p>", NESTED_NCX, guide);
+    let (_, after) = migrate(&before);
+    let nav = entry(&after, "OEBPS/nav.xhtml");
+
+    assert!(!nav.contains("cover.jpg"), "{nav}");
+    assert!(nav.contains(r#"epub:type="bodymatter""#), "{nav}");
+}
+
+#[test]
+fn a_book_with_no_guide_gets_no_landmarks_nav() {
+    // An empty <ol> is itself an error, so the section has to be omitted
+    // entirely rather than emitted blank.
+    let (_, after) = migrate(&epub2_ncx(VERSE, "<p>x</p>", NESTED_NCX));
+    assert!(!entry(&after, "OEBPS/nav.xhtml").contains("landmarks"));
+}
