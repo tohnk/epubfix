@@ -508,3 +508,264 @@ fn a_css_url_that_already_resolves_is_left_alone() {
     assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
     assert_eq!(entry(&after, "OEBPS/Styles/s.css"), css);
 }
+
+// ---------------------------------------------------------------------------
+// css-paths, and the candidate ladder
+// ---------------------------------------------------------------------------
+
+/// A book with a stylesheet at `OEBPS/Styles/s.css` and whatever else is given.
+fn css_book(css: &str, extra: &[(&str, &[u8])], extra_manifest: &str) -> Vec<u8> {
+    let opf = opf(
+        "2.0",
+        &format!(
+            "    <item id=\"css\" href=\"Styles/s.css\" media-type=\"text/css\"/>\n{extra_manifest}"
+        ),
+        "",
+        "",
+    );
+    let ch1 = doc("<p>text</p>");
+    let mut files: Vec<(&str, &[u8])> = vec![
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/Styles/s.css", css.as_bytes()),
+    ];
+    files.extend_from_slice(extra);
+    make_epub(&files)
+}
+
+fn css_of(after: &[(String, Vec<u8>)]) -> String {
+    entry(after, "OEBPS/Styles/s.css")
+}
+
+/// The *Butcher's Crossing* case: CSS resolves against the stylesheet, not the
+/// document that links it, so `url(OEBPS/Fonts/x.otf)` inside
+/// `OEBPS/Styles/s.css` reads as `OEBPS/Styles/OEBPS/Fonts/x.otf`. Reading the
+/// path from the archive root instead finds the font.
+#[test]
+fn a_url_written_from_the_archive_root_is_repointed() {
+    let css = "@font-face {\n  font-family: \"G\";\n  src: url(OEBPS/Fonts/g.otf);\n}\n";
+    let (outcome, after) = fix(&css_book(
+        css,
+        &[("OEBPS/Fonts/g.otf", b"OTTO\x00")],
+        "    <item id=\"f\" href=\"Fonts/g.otf\" media-type=\"font/otf\"/>\n",
+    ));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("repointed 1")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        css_of(&after).contains(r#"url("../Fonts/g.otf")"#),
+        "{}",
+        css_of(&after)
+    );
+    assert!(css_of(&after).contains("@font-face"), "the rule stays");
+}
+
+/// Deleting a dead `@font-face` is behaviour-preserving: the font could never
+/// load, so the fallback is what has been rendering all along.
+#[test]
+fn a_font_face_with_no_font_behind_it_is_removed_whole() {
+    let css = "@font-face {\n  font-family: \"Adobe Garamond Pro\";\n  \
+               src: url(OEBPS/Fonts/gone.otf);\n}\n\
+               p { font-family: \"Adobe Garamond Pro\", serif; }\n";
+    let (outcome, after) = fix(&css_book(css, &[], ""));
+    let fixed = css_of(&after);
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("@font-face")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!fixed.contains("@font-face"), "{fixed}");
+    assert!(!fixed.contains("gone.otf"), "{fixed}");
+    // The fallback that was already rendering must survive untouched.
+    assert!(
+        fixed.contains(r#"p { font-family: "Adobe Garamond Pro", serif; }"#),
+        "{fixed}"
+    );
+}
+
+#[test]
+fn a_dead_import_loses_the_statement_and_a_moved_one_is_repointed() {
+    let css = "@import url(\"gone.css\");\n@import url(\"OEBPS/Styles/other.css\");\n\
+               p { margin: 0 }\n";
+    let (_, after) = fix(&css_book(
+        css,
+        &[("OEBPS/Styles/other.css", b"em { font-style: italic }")],
+        "    <item id=\"o\" href=\"Styles/other.css\" media-type=\"text/css\"/>\n",
+    ));
+    let fixed = css_of(&after);
+
+    assert!(!fixed.contains("gone.css"), "{fixed}");
+    assert!(fixed.contains(r#"@import url("other.css");"#), "{fixed}");
+    assert!(fixed.contains("p { margin: 0 }"), "{fixed}");
+}
+
+#[test]
+fn a_dead_url_in_an_ordinary_rule_costs_only_its_own_declaration() {
+    let css = "p {\n  color: red;\n  background: url(missing.png);\n  margin: 0;\n}\n";
+    let (_, after) = fix(&css_book(css, &[], ""));
+    let fixed = css_of(&after);
+
+    assert!(!fixed.contains("missing.png"), "{fixed}");
+    assert!(fixed.contains("color: red"), "the rule survives: {fixed}");
+    assert!(fixed.contains("margin: 0"), "{fixed}");
+    assert!(fixed.contains("p {"), "{fixed}");
+}
+
+#[test]
+fn two_files_sharing_a_basename_are_reported_rather_than_guessed_at() {
+    let css = "p { background: url(dup.png) }\n";
+    let (outcome, after) = fix(&css_book(
+        css,
+        &[
+            ("OEBPS/A/dup.png", b"\x89PNG"),
+            ("OEBPS/B/dup.png", b"\x89PNG"),
+        ],
+        "    <item id=\"d1\" href=\"A/dup.png\" media-type=\"image/png\"/>\n\
+             \x20   <item id=\"d2\" href=\"B/dup.png\" media-type=\"image/png\"/>\n",
+    ));
+
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("matches 2 files")),
+        "got {:?}",
+        outcome.findings
+    );
+    assert_eq!(css_of(&after), css, "nothing may move");
+}
+
+#[test]
+fn a_stylesheet_whose_references_all_resolve_is_untouched() {
+    let css = "@font-face { src: url(\"../Fonts/g.otf\"); }\n\
+               p { background: url(data:image/gif;base64,AA); }\n\
+               a { color: blue }\n";
+    let (outcome, after) = fix(&css_book(
+        css,
+        &[("OEBPS/Fonts/g.otf", b"OTTO\x00")],
+        "    <item id=\"f\" href=\"Fonts/g.otf\" media-type=\"font/otf\"/>\n",
+    ));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert_eq!(css_of(&after), css);
+}
+
+/// A markup reference gets the same ladder: `styles/` for `Styles/`.
+#[test]
+fn a_link_whose_directory_differs_only_in_case_is_repointed() {
+    let opf = opf(
+        "2.0",
+        r#"    <item id="css" href="Styles/s.css" media-type="text/css"/>"#,
+        "",
+        "",
+    );
+    let ch1 = doc("<p>text</p>").replace(
+        "</head>",
+        r#"<link rel="stylesheet" type="text/css" href="styles/S.css"/></head>"#,
+    );
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/Styles/s.css", b"p { margin: 0 }"),
+    ]));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("repointed 1")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        ch1_of(&after).contains(r#"href="Styles/s.css""#),
+        "{}",
+        ch1_of(&after)
+    );
+}
+
+fn ch1_of(after: &[(String, Vec<u8>)]) -> String {
+    entry(after, "OEBPS/ch1.xhtml")
+}
+
+// ---------------------------------------------------------------------------
+// Manifest properties are computed from final state (§5j)
+// ---------------------------------------------------------------------------
+
+/// The ordering bug: `scripted` was declared for a `<script>` that
+/// `dangling-resources` then deleted, so the tool removed one error and
+/// introduced OPF-015 in the same run.
+#[test]
+fn a_property_is_not_declared_for_a_construct_a_later_fixer_removes() {
+    let opf = opf("3.0", "", "", "");
+    let ch1 = doc("<p>text</p>").replace("</head>", r#"<script src="js/kobo.js"></script></head>"#);
+    let (outcome, after) = roundtrip_kept(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+    ]));
+    let fixed = entry(&after, "OEBPS/content.opf");
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("removed 1 stylesheet/script")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!fixed.contains("scripted"), "{fixed}");
+}
+
+/// The same rule in the other direction: a property that is no longer earned
+/// is withdrawn, not left behind.
+#[test]
+fn a_property_nothing_still_needs_is_withdrawn() {
+    let opf = opf("3.0", "", "", "").replace(
+        r#"<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+        r#"<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml" properties="scripted svg"/>"#,
+    );
+    let ch1 = doc(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#);
+    let (outcome, after) = roundtrip_kept(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+    ]));
+    let fixed = entry(&after, "OEBPS/content.opf");
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("withdrew 1")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        fixed.contains(r#"properties="svg""#),
+        "svg is still earned: {fixed}"
+    );
+    assert!(!fixed.contains("scripted"), "{fixed}");
+}
+
+/// Properties this module does not derive say something about the item's role
+/// that no content scan could work out, so they are carried through.
+#[test]
+fn the_nav_property_is_never_touched_by_the_property_sync() {
+    let opf = opf("3.0", "", "", "").replace(
+        r#"<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+        r#"<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml" properties="nav scripted"/>"#,
+    );
+    let ch1 = doc("<p>text</p>");
+    let (_, after) = roundtrip_kept(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+    ]));
+    let fixed = entry(&after, "OEBPS/content.opf");
+
+    assert!(fixed.contains(r#"properties="nav""#), "{fixed}");
+    assert!(!fixed.contains("scripted"), "{fixed}");
+}

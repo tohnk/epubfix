@@ -20,6 +20,7 @@ use crate::book::Book;
 
 pub mod anchors;
 pub mod attrs;
+pub mod css_paths;
 pub mod filenames;
 pub mod ids;
 pub mod legacy_html;
@@ -125,6 +126,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         // delete.
         Box::new(opf::GuideReferences),
         Box::new(resources::DanglingResources),
+        Box::new(css_paths::CssPaths),
         Box::new(resources::BrokenFragments),
         // Before the renumbering, which closes the gaps removal leaves behind.
         Box::new(ncx::DeadNavEntries),

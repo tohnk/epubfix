@@ -666,43 +666,109 @@ fn modernise_dc_metadata(
     refines
 }
 
-/// Declare `svg` / `scripted` / `mathml` / `remote-resources` on manifest items
-/// whose documents need them.
-fn declare_properties(book: &Book, opf_name: &str, nodes: &[Node], edits: &mut Edits) -> u32 {
-    let mut count = 0;
+/// The manifest properties this module derives from document content.
+///
+/// Anything outside this list — `nav`, `cover-image` — says something about the
+/// item's *role* that no content scan could work out, so it is carried through
+/// untouched.
+const DERIVED: &[&str] = &["mathml", "remote-resources", "scripted", "svg"];
+
+/// Make every manifest item's derived properties match what its document now
+/// contains.
+///
+/// This is a sync rather than an accumulate, and it runs last, and both of
+/// those are the same lesson learned the same way. An earlier version computed
+/// properties during migration — before the fixers ran — and only ever added.
+/// On a book with `<script src="js/kobo.js">` pointing at a file that is not in
+/// the archive, it declared `scripted`, and then `dangling-resources` deleted
+/// the script that had been the only reason for it. The book went from two
+/// errors to one, and that one was OPF-015, `the property "scripted" should not
+/// be declared` — introduced by the tool, in the same run that removed its
+/// cause.
+///
+/// So: **derived declarations are computed from final state, never from initial
+/// state**, and a property that is no longer earned is removed as readily as a
+/// missing one is added.
+pub fn finalise_properties(book: &mut Book) -> Outcome {
+    // Properties are an EPUB 3 concept; an EPUB 2 manifest has no such attribute.
+    if book.epub_version() < 3 {
+        return Outcome::none();
+    }
+    let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+        return Outcome::none();
+    };
+    let Some(opf_src) = book.text(&opf_name).map(str::to_owned) else {
+        return Outcome::none();
+    };
+    let Ok(nodes) = scan(&opf_src) else {
+        return Outcome::none();
+    };
+
+    let mut edits = Edits::new();
+    let (mut added, mut removed) = (0u32, 0u32);
+
     for node in nodes.iter().filter(|n| n.name == "item") {
         let Some(href) = node.attr("href") else {
             continue;
         };
-        let Some((target, _)) = resolve_href(opf_name, &href.value) else {
+        let Some((target, _)) = resolve_href(&opf_name, &href.value) else {
             continue;
         };
         let Some(doc) = book.text(&target) else {
             continue;
         };
-        let props = document_properties(doc);
-        if props.is_empty() {
+
+        let existing = node.attr("properties");
+        let was: Vec<&str> = existing.map_or(Vec::new(), |a| a.value.split_whitespace().collect());
+        let earned = document_properties(doc);
+
+        // Keep everything this module does not own, then add what the finished
+        // document actually earns.
+        let mut now: Vec<String> = was
+            .iter()
+            .filter(|p| !DERIVED.contains(p))
+            .map(|p| (*p).to_string())
+            .collect();
+        now.extend(earned.iter().map(|p| (*p).to_string()));
+
+        let gained = earned.iter().filter(|p| !was.contains(p)).count();
+        let lost = was
+            .iter()
+            .filter(|p| DERIVED.contains(p) && !earned.contains(p))
+            .count();
+        if gained == 0 && lost == 0 {
             continue;
         }
-        let existing = node.attr("properties");
-        let mut all: Vec<String> = existing
-            .map(|a| a.value.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
-        for p in props {
-            if !all.iter().any(|x| x == p) {
-                all.push(p.to_string());
+        added += u32::try_from(gained).unwrap_or(u32::MAX);
+        removed += u32::try_from(lost).unwrap_or(u32::MAX);
+
+        match (existing, now.is_empty()) {
+            (Some(a), true) => edits.delete(a.span_with_space.clone()),
+            (Some(a), false) => {
+                edits.replace(a.span.clone(), format!("properties=\"{}\"", now.join(" ")));
             }
+            (None, false) => {
+                edits.insert(node.name_end, format!(" properties=\"{}\"", now.join(" ")));
+            }
+            (None, true) => {}
         }
-        let value = format!("properties=\"{}\"", all.join(" "));
-        match existing {
-            // Already declared everything it needs.
-            Some(a) if a.value.split_whitespace().count() == all.len() => continue,
-            Some(a) => edits.replace(a.span.clone(), value),
-            None => edits.insert(node.name_end, format!(" {value}")),
-        }
-        count += 1;
     }
-    count
+
+    if edits.is_empty() {
+        return Outcome::none();
+    }
+    book.set_text(&opf_name, edits.apply(&opf_src));
+
+    let mut outcome = Outcome::none();
+    if added > 0 {
+        outcome.push_change(format!("declared {added} manifest propert(ies)"));
+    }
+    if removed > 0 {
+        outcome.push_change(format!(
+            "withdrew {removed} manifest propert(ies) nothing in the book still needs"
+        ));
+    }
+    outcome
 }
 
 fn rewrite_package(
@@ -768,11 +834,6 @@ fn rewrite_package(
                 format!("{}\n  ", additions.join("\n")),
             );
         }
-    }
-
-    let propped = declare_properties(book, opf_name, &nodes, &mut edits);
-    if propped > 0 {
-        outcome.push_change(format!("declared manifest properties on {propped} item(s)"));
     }
 
     if let Some(nav) = nav_doc

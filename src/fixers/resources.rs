@@ -5,21 +5,13 @@
 //! defect, because nobody checks a link that looks fixed.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
-
-use regex::Regex;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
 use crate::markup::{Attr, Edits, Node, id_attrs, scan};
+use crate::paths::{Resolution, Resolver, relative_to};
 use crate::refs::resolve_href;
-use crate::util::{basename, ends_with_any, re};
-
-/// The argument of a CSS `url(...)`, with its quotes if it has any.
-///
-/// `data:` and absolute URLs are filtered out later by `resolve_href`, which
-/// already knows what is not a container-relative path.
-static CSS_URL_RE: LazyLock<Regex> = LazyLock::new(|| re(r"url\(\s*([^)]*?)\s*\)"));
+use crate::util::{basename, ends_with_any};
 
 /// Attributes that name another resource.
 ///
@@ -70,16 +62,7 @@ impl Fixer for DanglingResources {
 
     fn apply(&self, book: &mut Book) -> Outcome {
         let mut outcome = Outcome::none();
-
-        // Basename -> archive entries with that name, for the relocation case.
-        let mut by_basename: HashMap<String, Vec<String>> = HashMap::new();
-        for name in book.names() {
-            by_basename
-                .entry(basename(name).to_ascii_lowercase())
-                .or_default()
-                .push(name.clone());
-        }
-        let present: Vec<String> = book.names().to_vec();
+        let resolver = Resolver::new(book);
 
         let (mut repointed, mut dropped) = (0u32, 0u32);
         for doc in book.markup_names() {
@@ -91,87 +74,46 @@ impl Fixer for DanglingResources {
 
             for node in &nodes {
                 for attr in node.attrs.iter().filter(|a| is_reference(a)) {
-                    let Some((target, fragment)) = resolve_href(&doc, &attr.value) else {
-                        continue;
-                    };
-                    if present.contains(&target) {
-                        continue;
-                    }
-
-                    // Same file, different path?
-                    let matches = by_basename
-                        .get(&basename(&target).to_ascii_lowercase())
-                        .map_or(&[][..], Vec::as_slice);
-                    if let [only] = matches {
-                        let rel = relative_to(&doc, only);
-                        let value = match &fragment {
-                            Some(f) => format!("{rel}#{f}"),
-                            None => rel,
-                        };
-                        edits.replace(attr.span.clone(), format!("{}=\"{value}\"", attr.name));
-                        repointed += 1;
-                        continue;
-                    }
-
-                    // Genuinely absent.
-                    if is_pure_include(node) {
-                        edits.delete(node.element_span(&nodes));
-                        dropped += 1;
-                    } else {
-                        outcome.push_finding(format!(
-                            "{}: <{}> points at \"{}\", which is not in the book and has no \
-                             match anywhere; it carries content, so it was left alone",
+                    let fragment = resolve_href(&doc, &attr.value).and_then(|(_, f)| f);
+                    match resolver.resolve(&doc, &attr.value) {
+                        Resolution::Fine | Resolution::NotOurs => {}
+                        Resolution::Moved { target } => {
+                            let rel = relative_to(&doc, &target);
+                            let value = match &fragment {
+                                Some(f) => format!("{rel}#{f}"),
+                                None => rel,
+                            };
+                            edits.replace(attr.span.clone(), format!("{}=\"{value}\"", attr.name));
+                            repointed += 1;
+                        }
+                        Resolution::Ambiguous { count } => outcome.push_finding(format!(
+                            "{}: <{}> points at \"{}\", and {count} files share that name, so \
+                             there is no way to tell which was meant",
                             basename(&doc),
                             node.name,
                             attr.value
-                        ));
+                        )),
+                        // Genuinely absent.
+                        Resolution::Missing => {
+                            if is_pure_include(node) {
+                                edits.delete(node.element_span(&nodes));
+                                dropped += 1;
+                            } else {
+                                outcome.push_finding(format!(
+                                    "{}: <{}> points at \"{}\", which is not in the book and has \
+                                     no match anywhere; it carries content, so it was left alone",
+                                    basename(&doc),
+                                    node.name,
+                                    attr.value
+                                ));
+                            }
+                        }
                     }
                 }
             }
 
             if !edits.is_empty() {
                 book.set_text(&doc, edits.apply(&text));
-            }
-        }
-
-        // Stylesheets reference resources too, and nothing above sees them: a
-        // scanner that only reads markup never opens a .css file. One real book
-        // has an @font-face whose path doubles the directory —
-        // OEBPS/Styles/OEBPS/Fonts/… — which epubcheck reports as RSC-007
-        // against the stylesheet, and which the same unique-basename rule
-        // repoints correctly.
-        for name in book.names().to_vec() {
-            if !ends_with_any(&name, &[".css"]) {
-                continue;
-            }
-            let Some(css) = book.text(&name).map(str::to_owned) else {
-                continue;
-            };
-            let mut edits = Edits::new();
-            for m in CSS_URL_RE.captures_iter(&css) {
-                let value = m.get(1).expect("group 1 always matches");
-                let raw = value.as_str().trim().trim_matches(['"', '\'']);
-                let Some((target, _)) = resolve_href(&name, raw) else {
-                    continue;
-                };
-                if present.contains(&target) {
-                    continue;
-                }
-                let matches = by_basename
-                    .get(&basename(&target).to_ascii_lowercase())
-                    .map_or(&[][..], Vec::as_slice);
-                if let [only] = matches {
-                    edits.replace(value.range(), format!("\"{}\"", relative_to(&name, only)));
-                    repointed += 1;
-                } else {
-                    outcome.push_finding(format!(
-                        "{}: url({raw}) is not in the book and has no match anywhere",
-                        basename(&name)
-                    ));
-                }
-            }
-            if !edits.is_empty() {
-                book.set_text(&name, edits.apply(&css));
             }
         }
 
@@ -187,22 +129,6 @@ impl Fixer for DanglingResources {
         }
         outcome
     }
-}
-
-/// Express `target` as a path relative to the directory holding `from`.
-fn relative_to(from: &str, target: &str) -> String {
-    let from_dir: Vec<&str> = from.split('/').collect();
-    let to: Vec<&str> = target.split('/').collect();
-    let shared = from_dir
-        .iter()
-        .take(from_dir.len() - 1)
-        .zip(to.iter().take(to.len() - 1))
-        .take_while(|(a, b)| a == b)
-        .count();
-    let ups = from_dir.len() - 1 - shared;
-    let mut out = "../".repeat(ups);
-    out.push_str(&to[shared..].join("/"));
-    out
 }
 
 /// RSC-012: `Fragment identifier is not defined`.
@@ -381,26 +307,4 @@ fn backlinks(book: &Book) -> HashMap<String, String> {
 
 fn is_linky(name: &str) -> bool {
     ends_with_any(name, &[".xhtml", ".html", ".htm", ".ncx", ".opf"])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::relative_to;
-
-    #[test]
-    fn relative_paths_climb_only_as_far_as_needed() {
-        assert_eq!(
-            relative_to("OEBPS/Text/a.xhtml", "OEBPS/Text/b.xhtml"),
-            "b.xhtml"
-        );
-        assert_eq!(
-            relative_to("OEBPS/Text/a.xhtml", "OEBPS/Styles/s.css"),
-            "../Styles/s.css"
-        );
-        assert_eq!(
-            relative_to("OEBPS/a.xhtml", "OEBPS/Styles/s.css"),
-            "Styles/s.css"
-        );
-        assert_eq!(relative_to("a.xhtml", "b.xhtml"), "b.xhtml");
-    }
 }

@@ -12,6 +12,7 @@ pub mod entities;
 pub mod fixers;
 pub mod markup;
 pub mod migrate;
+pub mod paths;
 pub mod refs;
 pub mod util;
 pub mod verify;
@@ -102,6 +103,21 @@ impl Default for Options {
 /// Run every fixer over `book`.
 pub fn fix_book(book: &mut Book) -> Outcome {
     fix_book_with(book, &fixers::all(&Options::default()))
+}
+
+/// The last phase of a run: declarations derived from what the documents
+/// finally contain.
+///
+/// Separate from the fixer registry because it is not a repair — it is
+/// bookkeeping that only makes sense once every repair has landed. Manifest
+/// properties are the case in point: several fixers can remove the very
+/// construct that earned one, and computing them any earlier means declaring a
+/// property the finished book does not need.
+///
+/// Anything running the pipeline by hand needs to call this too, after
+/// [`fix_book`]; `fix_file` does it for you.
+pub fn finish_book(book: &mut Book) -> Outcome {
+    migrate::finalise_properties(book)
 }
 
 /// Convert `book` to EPUB 3, but only if the result preserves everything.
@@ -234,6 +250,9 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
         outcome.merge(retag_book(&mut book));
     }
     outcome.merge(fix_book_with(&mut book, &selected));
+    if opts.only.is_empty() {
+        outcome.merge(finish_book(&mut book));
+    }
     if !outcome.has_changes() || opts.dry_run {
         return Ok(outcome);
     }

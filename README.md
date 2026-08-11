@@ -42,7 +42,8 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `misplaced-blockquotes` | RSC-005 | splits a paragraph around a `<blockquote>` it swallowed, or demotes the quotation to a `<span>` |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
 | `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
-| `dangling-resources` | RSC-007 | repoints references whose file moved — in stylesheets as well as markup — and drops dead stylesheet/script includes, never an `<img>` or `<a>` |
+| `dangling-resources` | RSC-007 | repoints references whose file moved, and drops dead stylesheet/script includes — never an `<img>` or `<a>` |
+| `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-duplicate-ids` | RSC-005 | makes duplicated NCX ids unique, leaving any that are referenced alone |
@@ -103,6 +104,45 @@ error for another. So the default repair is to migrate the anchor's *id* onto
 the nearest legal element (the following row, else the preceding one, else the
 table), which is valid under both rulesets and keeps the link landing in the
 same place.
+
+### Finding what a broken reference meant
+
+There are several ways a path can be wrong and only one way it can be right, so
+rather than special-casing each mistake, `dangling-resources` and `css-paths`
+generate the paths a reference could plausibly have meant and let **existence in
+the archive** decide. First candidate that exists wins:
+
+| | Candidate | The mistake it catches |
+| --- | --- | --- |
+| 1 | relative to the referring file | none — this is the correct reading |
+| 2 | relative to the archive root | a relative URL written as if root-relative |
+| 3 | relative to the package document | the same, anchored on the OPF |
+| 4 | the unique entry with that basename | the file moved |
+| 5 | as 4, ignoring case | `styles/` written for `Styles/` |
+
+Candidate 2 is *Butcher's Crossing*: `OEBPS/Styles/nyrb.css` contains
+`url(OEBPS/Fonts/AGaramondPro-Regular.otf)`, and CSS resolves against the
+stylesheet rather than the document that links it, so that reads as
+`OEBPS/Styles/OEBPS/Fonts/…` — the doubled directory epubcheck reports. The root
+is taken from the archive rather than assumed: real books use `OPS/`, `ops/`,
+`OEBPS/html/` and `CompletePoems/`. Candidates 4 and 5 require the match to be
+unique; two files with the same basename is a report, not a guess.
+
+When nothing resolves, what gets deleted is whatever unit has become
+meaningless — the whole `@font-face` (a face with no source is nothing), the
+`@import` statement, or just the one declaration. Never an `<img>` or an `<a>`:
+those carry content, and their absence is a defect to report.
+
+### Derived declarations come last
+
+Manifest properties are computed after every fixer has run, and are *synced*
+rather than accumulated — a property no longer earned is withdrawn as readily as
+a missing one is added. This is not tidiness. Computing them earlier meant
+declaring `scripted` for a `<script src="js/kobo.js">` and then watching
+`dangling-resources` delete the script that was its only cause; the book went
+from two errors to one, and that one was `OPF-015`, *the property "scripted"
+should not be declared* — introduced by the tool in the same run that removed
+its reason to exist.
 
 ## Version retagging
 
@@ -422,6 +462,10 @@ to 0) and EPUB 3 (20 errors to 0); a Coleridge-shaped EPUB 2 book with verse in
 `<blockquote>`, legacy `opf:` metadata, a nested NCX with a `pageList` and
 uncaptioned images goes from 24 errors to 0, and a book declaring EPUB 3 while written as EPUB 2
 goes from 1 fatal + 11 errors to 0 by being retagged downward.
+
+*Butcher's Crossing* — the book the path work came from — goes from 3 errors to
+0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
+intact, and the NCX identifier synced.
 
 A book carrying every defect from the second sweep at once — duplicated Kobo
 ids, `data-AmznRemoved`, a paragraph that swallowed a `<blockquote>`, a nested
