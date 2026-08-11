@@ -44,6 +44,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
 | `dangling-resources` | RSC-007 | repoints references whose file moved, and drops dead stylesheet/script includes — never an `<img>` or `<a>` |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
+| `dead-schemes` | HTM-025 | drops `href`s using a reading system's private scheme (`kindle:`, `calibre:`, …), keeping the text and any id |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-duplicate-ids` | RSC-005 | makes duplicated NCX ids unique, leaving any that are referenced alone |

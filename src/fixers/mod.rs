@@ -128,6 +128,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(resources::DanglingResources),
         Box::new(css_paths::CssPaths),
         Box::new(resources::BrokenFragments),
+        Box::new(resources::DeadSchemes),
         // Before the renumbering, which closes the gaps removal leaves behind.
         Box::new(ncx::DeadNavEntries),
         Box::new(ncx::NcxDuplicateIds),

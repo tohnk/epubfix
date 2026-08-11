@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::markup::{Attr, Edits, Node, id_attrs, scan};
+use crate::markup::{Attr, Edits, Node, NodeKind, id_attrs, scan};
 use crate::paths::{Resolution, Resolver, relative_to};
 use crate::refs::resolve_href;
 use crate::util::{basename, ends_with_any};
@@ -307,4 +307,134 @@ fn backlinks(book: &Book) -> HashMap<String, String> {
 
 fn is_linky(name: &str) -> bool {
     ends_with_any(name, &[".xhtml", ".html", ".htm", ".ncx", ".opf"])
+}
+
+/// HTM-025: `Non-registered URI scheme type found in href`.
+///
+/// Conversion tools leave their own private links behind. A Kindle-derived
+/// book carries `<a href="kindle:pos:fid:0001:off:0000000000">`, which no
+/// reading system on earth can follow once the file is an EPUB — the position
+/// it names belongs to a different format. The same goes for the handful of
+/// other reader-private schemes below.
+///
+/// Measured against EPUB Check 5.2.1, which keeps a narrower list than the IANA
+/// registry: `http`, `https`, `mailto`, `ftp`, `tel`, `urn`, `news` and
+/// `javascript` pass, while `kindle`, `calibre`, `ibooks`, `kobo`, `epub` — and
+/// also `sms`, `about` and `webcal`, which are somebody's real intention — draw
+/// the warning.
+///
+/// That difference decides the scope. Only the reader-private schemes are
+/// touched, because only those are *provably* dead: the link cannot resolve
+/// anywhere, for anyone, ever. A `sms:` or `x-custom:` link is a warning about
+/// a link that might well work, and guessing at it is not this fixer's job.
+///
+/// The repair is to drop the `href` and nothing else. An `<a>` with no `href`
+/// is valid in both rulesets — measured, both ways — so the text stays where it
+/// is, and any `id` on the anchor stays with it, which matters because inbound
+/// fragments may well be pointing at it.
+pub struct DeadSchemes;
+
+/// Schemes belonging to one reading system's internal addressing, which cannot
+/// resolve in a distributed EPUB.
+const READER_PRIVATE: &[&str] = &["kindle", "calibre", "ibooks", "kobo", "epub"];
+
+/// The scheme of `value`, lowercased, if it has one.
+///
+/// A bare `foo.xhtml#bar` has no scheme; neither does `#bar`. The grammar is
+/// RFC 3986's: a letter, then letters, digits, `+`, `-` or `.`.
+fn scheme_of(value: &str) -> Option<String> {
+    let (head, _) = value.split_once(':')?;
+    if head.is_empty() || !head.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    head.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        .then(|| head.to_ascii_lowercase())
+}
+
+impl Fixer for DeadSchemes {
+    fn name(&self) -> &'static str {
+        "dead-schemes"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["HTM-025"]
+    }
+    fn description(&self) -> &'static str {
+        "drop hrefs using a reading system's private scheme, which cannot resolve anywhere"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let mut outcome = Outcome::none();
+        let mut dropped = 0u32;
+        let mut seen: Vec<String> = Vec::new();
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for node in nodes.iter().filter(|n| n.kind != NodeKind::End) {
+                for attr in node.attrs.iter().filter(|a| is_reference(a)) {
+                    let Some(scheme) = scheme_of(attr.value.trim()) else {
+                        continue;
+                    };
+                    if !READER_PRIVATE.contains(&scheme.as_str()) {
+                        continue;
+                    }
+                    // Only an anchor can lose its reference and still be
+                    // itself. An <img> without a src is a different error.
+                    if node.name != "a" || attr.name != "href" {
+                        outcome.push_finding(format!(
+                            "{}: <{}> uses the {scheme}: scheme, which no reading system can \
+                             follow, but removing the reference would leave the element \
+                             invalid, so it was left alone",
+                            basename(&doc),
+                            node.name
+                        ));
+                        continue;
+                    }
+                    edits.delete(attr.span_with_space.clone());
+                    dropped += 1;
+                    if !seen.contains(&scheme) {
+                        seen.push(scheme);
+                    }
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if dropped > 0 {
+            seen.sort();
+            outcome.push_change(format!(
+                "dropped {dropped} dead {} link(s), keeping the text and any id",
+                seen.iter()
+                    .map(|s| format!("{s}:"))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ));
+        }
+        outcome
+    }
+}
+
+#[cfg(test)]
+mod scheme_tests {
+    use super::scheme_of;
+
+    #[test]
+    fn a_scheme_is_recognised_only_where_there_is_one() {
+        assert_eq!(scheme_of("kindle:pos:fid:1"), Some("kindle".into()));
+        assert_eq!(scheme_of("KINDLE:pos"), Some("kindle".into()));
+        assert_eq!(scheme_of("x-cus+tom.1:a"), Some("x-cus+tom.1".into()));
+        // Relative paths, including the ones with a colon in them.
+        assert_eq!(scheme_of("chapter.xhtml#frag"), None);
+        assert_eq!(scheme_of("#frag"), None);
+        assert_eq!(scheme_of("../Images/a.jpg"), None);
+        assert_eq!(scheme_of("2:1 Corinthians.xhtml"), None);
+    }
 }

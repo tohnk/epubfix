@@ -793,3 +793,53 @@ fn a_directory_that_disambiguates_is_used_rather_than_reporting_a_tie() {
         css_of(&after)
     );
 }
+
+// ---------------------------------------------------------------------------
+// dead-schemes
+// ---------------------------------------------------------------------------
+
+/// The Kindle leftover: `kindle:pos:…` names a position in a different file
+/// format, so the link is dead for every reader of the EPUB.
+#[test]
+fn a_reader_private_scheme_loses_its_href_and_keeps_everything_else() {
+    let (outcome, after) = fix(&book2(
+        r#"<p><a id="k1" class="lnk" href="kindle:pos:fid:0001:off:0000000000">Genesis</a></p>"#,
+    ));
+    let fixed = ch1(&after);
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("dropped 1 dead kindle:")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!fixed.contains("kindle:"), "{fixed}");
+    // An <a> with no href is valid in both rulesets, so the element, its text,
+    // its class and — importantly — its id all stay where they were.
+    assert!(
+        fixed.contains(r#"<a id="k1" class="lnk">Genesis</a>"#),
+        "{fixed}"
+    );
+}
+
+/// A warning is not a licence to guess. `sms:` draws the same HTM-025 but is
+/// somebody's real intention, so it is left exactly as written.
+#[test]
+fn a_scheme_that_might_mean_something_is_left_alone() {
+    let before = book2(r#"<p><a href="sms:+15551234">text</a> <a href="x-custom:thing">x</a></p>"#);
+    let (outcome, after) = fix(&before);
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert!(ch1(&after).contains("sms:+15551234"));
+    assert!(ch1(&after).contains("x-custom:thing"));
+}
+
+#[test]
+fn ordinary_links_are_untouched_by_the_scheme_check() {
+    let (outcome, _) = fix(&book2(
+        r##"<p><a href="ch1.xhtml#top">a</a> <a href="https://example.org">b</a>
+        <a href="mailto:x@example.org">c</a> <a href="#top">d</a></p><p id="top">t</p>"##,
+    ));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+}
