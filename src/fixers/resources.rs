@@ -309,6 +309,31 @@ fn is_linky(name: &str) -> bool {
     ends_with_any(name, &[".xhtml", ".html", ".htm", ".ncx", ".opf"])
 }
 
+/// True if `node` sits inside a `<nav>`.
+fn in_nav(nodes: &[Node], node: &Node) -> bool {
+    let mut cur = node.parent;
+    while let Some(p) = cur {
+        if nodes[p].name == "nav" {
+            return true;
+        }
+        cur = nodes[p].parent;
+    }
+    false
+}
+
+/// The visible text of an element, for naming it in a report.
+fn label(text: &str, nodes: &[Node], node: &Node) -> String {
+    let Some(close) = node.close else {
+        return String::new();
+    };
+    let inner = &text[node.span.end..nodes[close].span.start];
+    let stripped: String = inner
+        .split('<')
+        .map(|chunk| chunk.split_once('>').map_or(chunk, |(_, after)| after))
+        .collect();
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// HTM-025: `Non-registered URI scheme type found in href`.
 ///
 /// Conversion tools leave their own private links behind. A Kindle-derived
@@ -398,7 +423,21 @@ impl Fixer for DeadSchemes {
                     edits.delete(attr.span_with_space.clone());
                     dropped += 1;
                     if !seen.contains(&scheme) {
-                        seen.push(scheme);
+                        seen.push(scheme.clone());
+                    }
+                    // Inside a <nav> the anchor was a way of getting somewhere,
+                    // and now it is not. The document stays valid — measured,
+                    // in a real nav document as well as an ordinary one — but
+                    // the reader loses that entry, which is worth saying out
+                    // loud rather than burying in a count.
+                    if in_nav(&nodes, node) {
+                        outcome.push_finding(format!(
+                            "{}: the \"{}\" navigation entry pointed at a {scheme}: address and \
+                             now points nowhere; it is still valid, but if you want it working \
+                             it needs a target choosing by hand",
+                            basename(&doc),
+                            label(&text, &nodes, node)
+                        ));
                     }
                 }
             }

@@ -843,3 +843,34 @@ fn ordinary_links_are_untouched_by_the_scheme_check() {
     ));
     assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
 }
+
+/// Dropping the href keeps the document valid — measured, in a real nav
+/// document as well as an ordinary one — but a navigation entry that now goes
+/// nowhere is a loss the reader would notice, so it is named rather than
+/// buried in a count.
+#[test]
+fn a_navigation_entry_that_loses_its_target_is_named() {
+    let (outcome, after) = fix(&book2(
+        r#"<nav epub:type="landmarks"><ol>
+        <li><a epub:type="cover" href="kindle:embed:0001?mime=image/jpg">Cover</a></li>
+        </ol></nav>"#,
+    ));
+
+    assert!(!ch1(&after).contains("kindle:"));
+    let finding = outcome
+        .findings
+        .iter()
+        .find(|f| f.contains("navigation entry"))
+        .unwrap_or_else(|| panic!("expected a report, got {:?}", outcome.findings));
+    assert!(finding.contains("\"Cover\""), "names the entry: {finding}");
+}
+
+/// An ordinary body link losing a dead scheme is not a navigation loss, so it
+/// draws no report.
+#[test]
+fn an_ordinary_dead_link_is_fixed_without_a_report() {
+    let (outcome, _) = fix(&book2(
+        r#"<p><a href="kindle:pos:fid:0001">Genesis</a></p>"#,
+    ));
+    assert!(outcome.findings.is_empty(), "got {:?}", outcome.findings);
+}
