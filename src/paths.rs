@@ -14,7 +14,7 @@
 //! | 1 | relative to the referring file | none — this is the correct reading |
 //! | 2 | relative to the archive root | an author treating a relative URL as root-relative |
 //! | 3 | relative to the package document | the same, anchored on the OPF instead |
-//! | 4 | the unique entry with that basename | the file moved |
+//! | 4 | the unique entry ending with the longest run of the written path | the file moved |
 //! | 5 | as 4, ignoring case | `styles/` written for `Styles/` |
 //!
 //! Candidate 2 is *Butcher's Crossing*: `OEBPS/Styles/nyrb.css` contains
@@ -27,12 +27,22 @@
 //! library has `OPS/`, `ops/`, `OEBPS/html/` and `CompletePoems/` as package
 //! directories. `OEBPS` is a convention, not a rule.
 //!
-//! Candidates 4 and 5 require the match to be **unique**. Two files with the
-//! same basename and no way to choose between them is a report, not a guess.
+//! Candidates 4 and 5 require the match to be **unique**, and they match on as
+//! much of the written path as they can rather than on the filename alone. That
+//! matters whenever a book keeps two copies of a picture: with
+//! `OEBPS/assets/Images/plate.jpg` and `OEBPS/Thumbs/plate.jpg` both present, a
+//! reference to `Images/plate.jpg` names one of them unambiguously, and a
+//! filename-only match would throw that away and report a tie.
+//!
+//! Suffixes are tried longest-first, and a suffix only matches on segment
+//! boundaries — `es/plate.jpg` is not a suffix of `Images/plate.jpg`. Because a
+//! shorter suffix always matches at least as many files as a longer one, the
+//! first length that matches anything is also the most specific, and if *it* is
+//! ambiguous every shorter one is too. So the search stops there and reports.
 
 use crate::book::Book;
 use crate::refs::resolve_href;
-use crate::util::{basename, dirname};
+use crate::util::dirname;
 
 /// What became of one reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,17 +94,23 @@ impl Resolver {
         self.names.iter().any(|n| n == name)
     }
 
-    /// Entries whose basename matches, optionally ignoring case.
-    fn by_basename(&self, want: &str, fold: bool) -> Vec<&String> {
+    /// Entries whose path ends with `want`, matched on segment boundaries.
+    fn by_suffix(&self, want: &[&str], fold: bool) -> Vec<&String> {
         self.names
             .iter()
             .filter(|n| {
-                let b = basename(n);
-                if fold {
-                    b.eq_ignore_ascii_case(want)
-                } else {
-                    b == want
-                }
+                let have: Vec<&str> = n.split('/').collect();
+                have.len() >= want.len()
+                    && have[have.len() - want.len()..]
+                        .iter()
+                        .zip(want)
+                        .all(|(a, b)| {
+                            if fold {
+                                a.eq_ignore_ascii_case(b)
+                            } else {
+                                a == b
+                            }
+                        })
             })
             .collect()
     }
@@ -123,21 +139,25 @@ impl Resolver {
             }
         }
 
-        // The file moved. Match on the name alone, exactly first, then ignoring
-        // case — a book whose manifest says `Styles/` and whose markup says
-        // `styles/` is common, and the fold must not mask a genuine pair of
-        // files that differ only in case.
+        // The file moved. Match on as much of the written path as still exists
+        // somewhere, longest first, exactly before ignoring case — a book whose
+        // manifest says `Styles/` and whose markup says `styles/` is common, but
+        // the fold must not mask a genuine pair of files differing only in case.
+        let segments: Vec<&str> = literal.split('/').collect();
         for fold in [false, true] {
-            match self.by_basename(basename(&literal), fold).as_slice() {
-                [only] => {
-                    return Resolution::Moved {
-                        target: (*only).clone(),
-                    };
+            for k in (1..=segments.len()).rev() {
+                let matches = self.by_suffix(&segments[segments.len() - k..], fold);
+                match matches.as_slice() {
+                    [] => {}
+                    [only] => {
+                        return Resolution::Moved {
+                            target: (*only).clone(),
+                        };
+                    }
+                    // A shorter suffix can only match more files, so there is
+                    // nothing better further down.
+                    many => return Resolution::Ambiguous { count: many.len() },
                 }
-                many if many.len() > 1 => {
-                    return Resolution::Ambiguous { count: many.len() };
-                }
-                _ => {}
             }
         }
 

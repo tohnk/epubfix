@@ -117,7 +117,7 @@ the archive** decide. First candidate that exists wins:
 | 1 | relative to the referring file | none — this is the correct reading |
 | 2 | relative to the archive root | a relative URL written as if root-relative |
 | 3 | relative to the package document | the same, anchored on the OPF |
-| 4 | the unique entry with that basename | the file moved |
+| 4 | the unique entry ending with the longest run of the written path | the file moved |
 | 5 | as 4, ignoring case | `styles/` written for `Styles/` |
 
 Candidate 2 is *Butcher's Crossing*: `OEBPS/Styles/nyrb.css` contains
@@ -125,8 +125,17 @@ Candidate 2 is *Butcher's Crossing*: `OEBPS/Styles/nyrb.css` contains
 stylesheet rather than the document that links it, so that reads as
 `OEBPS/Styles/OEBPS/Fonts/…` — the doubled directory epubcheck reports. The root
 is taken from the archive rather than assumed: real books use `OPS/`, `ops/`,
-`OEBPS/html/` and `CompletePoems/`. Candidates 4 and 5 require the match to be
-unique; two files with the same basename is a report, not a guess.
+`OEBPS/html/` and `CompletePoems/`.
+
+Candidates 4 and 5 require the match to be unique, and they use as much of the
+written path as still exists rather than the filename alone — a reference names
+a directory too, and that is evidence. With `OEBPS/assets/Images/plate.jpg` and
+`OEBPS/Thumbs/plate.jpg` both in the book, `Images/plate.jpg` picks out one of
+them; matching on `plate.jpg` would throw the directory away and report a tie it
+did not have to. Suffixes are tried longest-first on segment boundaries, and
+because a shorter suffix always matches at least as many files as a longer one,
+the first length that matches anything is the most specific there is — if that
+one is ambiguous, so is every shorter one, and the answer is a report.
 
 When nothing resolves, what gets deleted is whatever unit has become
 meaningless — the whole `@font-face` (a face with no source is nothing), the

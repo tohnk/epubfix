@@ -769,3 +769,27 @@ fn the_nav_property_is_never_touched_by_the_property_sync() {
     assert!(fixed.contains(r#"properties="nav""#), "{fixed}");
     assert!(!fixed.contains("scripted"), "{fixed}");
 }
+
+/// A reference names a directory as well as a file, and that is evidence worth
+/// using: with two copies of a picture in the book, `Images/plate.jpg` picks out
+/// one of them unambiguously. Matching on the filename alone would throw the
+/// directory away and report a tie it did not have to.
+#[test]
+fn a_directory_that_disambiguates_is_used_rather_than_reporting_a_tie() {
+    let css = "p { background: url(Images/plate.jpg) }\n";
+    let (outcome, after) = fix(&css_book(
+        css,
+        &[
+            ("OEBPS/assets/Images/plate.jpg", b"\xff\xd8"),
+            ("OEBPS/Thumbs/plate.jpg", b"\xff\xd8"),
+        ],
+        "    <item id=\"i1\" href=\"assets/Images/plate.jpg\" media-type=\"image/jpeg\"/>\n\
+         \x20   <item id=\"i2\" href=\"Thumbs/plate.jpg\" media-type=\"image/jpeg\"/>\n",
+    ));
+    assert!(
+        css_of(&after).contains("../assets/Images/plate.jpg"),
+        "expected the Images/ one, got {:?} / {}",
+        outcome.findings,
+        css_of(&after)
+    );
+}
