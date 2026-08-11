@@ -334,6 +334,91 @@ fn label(text: &str, nodes: &[Node], node: &Node) -> String {
     stripped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Where the landmarks EPUB 3 names by role actually live in this book.
+///
+/// Both are derived from the package rather than guessed at. `cover-image` and
+/// `nav` are manifest properties with exactly one meaning each, and the cover
+/// *document* is whichever content document displays the cover image — a
+/// question the archive answers, not one anybody has to have an opinion about.
+#[derive(Default)]
+struct Landmarks {
+    cover: Option<String>,
+    toc: Option<String>,
+}
+
+impl Landmarks {
+    /// The document a landmark of this `epub:type` should point at.
+    ///
+    /// `epub:type` takes a space-separated list, so `"cover frontmatter"` is a
+    /// cover.
+    fn target(&self, epub_type: &str) -> Option<&String> {
+        epub_type.split_whitespace().find_map(|t| match t {
+            "cover" => self.cover.as_ref(),
+            "toc" => self.toc.as_ref(),
+            _ => None,
+        })
+    }
+}
+
+/// True if `doc` pulls in `target` — an `<img src>`, an SVG `<image
+/// xlink:href>`, anything that displays it.
+fn displays(book: &Book, doc: &str, target: &str) -> bool {
+    let Some(text) = book.text(doc) else {
+        return false;
+    };
+    let Ok(nodes) = scan(text) else { return false };
+    nodes.iter().any(|n| {
+        n.attrs
+            .iter()
+            .filter(|a| is_reference(a))
+            .any(|a| resolve_href(doc, &a.value).is_some_and(|(t, _)| t == target))
+    })
+}
+
+fn landmark_targets(book: &Book) -> Landmarks {
+    let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+        return Landmarks::default();
+    };
+    let Some(opf) = book.text(&opf_name) else {
+        return Landmarks::default();
+    };
+    let Ok(nodes) = scan(opf) else {
+        return Landmarks::default();
+    };
+
+    let named = |want: &str| {
+        nodes
+            .iter()
+            .filter(|n| n.name == "item")
+            .find(|n| {
+                n.attr("properties")
+                    .is_some_and(|p| p.value.split_whitespace().any(|t| t == want))
+            })
+            .and_then(|n| n.attr("href"))
+            .and_then(|h| resolve_href(&opf_name, &h.value))
+            .map(|(t, _)| t)
+    };
+
+    // The cover document is the one that shows the cover image. Requiring a
+    // unique match keeps this a derivation rather than a preference.
+    let cover = named("cover-image").and_then(|image| {
+        let showing: Vec<String> = book
+            .markup_names()
+            .into_iter()
+            .filter(|d| displays(book, d, &image))
+            .collect();
+        match showing.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
+    });
+
+    Landmarks {
+        cover,
+        toc: named("nav"),
+    }
+}
+
 /// HTM-025: `Non-registered URI scheme type found in href`.
 ///
 /// Conversion tools leave their own private links behind. A Kindle-derived
@@ -390,7 +475,8 @@ impl Fixer for DeadSchemes {
 
     fn apply(&self, book: &mut Book) -> Outcome {
         let mut outcome = Outcome::none();
-        let mut dropped = 0u32;
+        let landmarks = landmark_targets(book);
+        let (mut dropped, mut repointed) = (0u32, 0u32);
         let mut seen: Vec<String> = Vec::new();
 
         for doc in book.markup_names() {
@@ -420,6 +506,21 @@ impl Fixer for DeadSchemes {
                         ));
                         continue;
                     }
+                    // The anchor may say what it is for. `epub:type="cover"`
+                    // is not a hint to be interpreted — it is a declaration,
+                    // and EPUB 3 says where a cover and a toc live, so the
+                    // link can be repaired rather than merely silenced.
+                    if let Some(kind) = node.attr("epub:type")
+                        && let Some(target) = landmarks.target(&kind.value)
+                    {
+                        edits.replace(
+                            attr.span.clone(),
+                            format!("href=\"{}\"", relative_to(&doc, target)),
+                        );
+                        repointed += 1;
+                        continue;
+                    }
+
                     edits.delete(attr.span_with_space.clone());
                     dropped += 1;
                     if !seen.contains(&scheme) {
@@ -428,13 +529,13 @@ impl Fixer for DeadSchemes {
                     // Inside a <nav> the anchor was a way of getting somewhere,
                     // and now it is not. The document stays valid — measured,
                     // in a real nav document as well as an ordinary one — but
-                    // the reader loses that entry, which is worth saying out
-                    // loud rather than burying in a count.
+                    // the reader loses that entry, and nothing in the package
+                    // says where it should have gone.
                     if in_nav(&nodes, node) {
                         outcome.push_finding(format!(
-                            "{}: the \"{}\" navigation entry pointed at a {scheme}: address and \
-                             now points nowhere; it is still valid, but if you want it working \
-                             it needs a target choosing by hand",
+                            "{}: the \"{}\" navigation entry pointed at a {scheme}: address, \
+                             and nothing in the package says what it should point at instead, \
+                             so the link was removed and the text kept",
                             basename(&doc),
                             label(&text, &nodes, node)
                         ));
@@ -447,6 +548,11 @@ impl Fixer for DeadSchemes {
             }
         }
 
+        if repointed > 0 {
+            outcome.push_change(format!(
+                "repointed {repointed} dead link(s) at what the package says they are for"
+            ));
+        }
         if dropped > 0 {
             seen.sort();
             outcome.push_change(format!(

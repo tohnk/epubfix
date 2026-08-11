@@ -44,7 +44,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
 | `dangling-resources` | RSC-007 | repoints references whose file moved, and drops dead stylesheet/script includes — never an `<img>` or `<a>` |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
-| `dead-schemes` | HTM-025 | drops `href`s using a reading system's private scheme (`kindle:`, `calibre:`, …), keeping the text and any id |
+| `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-duplicate-ids` | RSC-005 | makes duplicated NCX ids unique, leaving any that are referenced alone |
@@ -142,6 +142,29 @@ When nothing resolves, what gets deleted is whatever unit has become
 meaningless — the whole `@font-face` (a face with no source is nothing), the
 `@import` statement, or just the one declaration. Never an `<img>` or an `<a>`:
 those carry content, and their absence is a defect to report.
+
+### Repairing a dead link, not just silencing it
+
+A Kindle-derived book carries `<a href="kindle:embed:0001?mime=image/jpg">`,
+which names a position in a different file format — dead for every reader of the
+EPUB. Dropping the `href` clears the warning and leaves the document valid, but
+when the anchor is a landmark it also leaves the reader's *go to cover* doing
+nothing. That is silencing the warning rather than fixing what it is about.
+
+Often the anchor says what it is for. `epub:type="cover"` is not a hint to be
+interpreted, it is a declaration, and EPUB 3 says where those things live:
+
+| `epub:type` | Where the package says it is |
+| --- | --- |
+| `cover` | the manifest names the cover *image* via `properties="cover-image"`; the cover *document* is whichever content document displays it |
+| `toc` | the manifest item with `properties="nav"` |
+
+Both are derivations, not preferences — the archive answers them. The cover case
+requires the match to be unique, so a book where two documents show the cover
+image gets a report instead. Anything else keeps the old behaviour: the `href`
+goes, the text and any `id` stay, and if the anchor was inside a `<nav>` the
+lost entry is named, because nothing in the package says where it should have
+gone.
 
 ### Derived declarations come last
 

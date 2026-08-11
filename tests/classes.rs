@@ -844,12 +844,11 @@ fn ordinary_links_are_untouched_by_the_scheme_check() {
     assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
 }
 
-/// Dropping the href keeps the document valid — measured, in a real nav
-/// document as well as an ordinary one — but a navigation entry that now goes
-/// nowhere is a loss the reader would notice, so it is named rather than
-/// buried in a count.
+/// When nothing in the package says where a navigation entry should point, the
+/// link goes and the loss is named rather than buried in a count. This book has
+/// no cover-image and no nav, so there is nothing to derive from.
 #[test]
-fn a_navigation_entry_that_loses_its_target_is_named() {
+fn a_navigation_entry_with_nothing_to_derive_from_is_named() {
     let (outcome, after) = fix(&book2(
         r#"<nav epub:type="landmarks"><ol>
         <li><a epub:type="cover" href="kindle:embed:0001?mime=image/jpg">Cover</a></li>
@@ -863,6 +862,112 @@ fn a_navigation_entry_that_loses_its_target_is_named() {
         .find(|f| f.contains("navigation entry"))
         .unwrap_or_else(|| panic!("expected a report, got {:?}", outcome.findings));
     assert!(finding.contains("\"Cover\""), "names the entry: {finding}");
+}
+
+/// A book with the standard EPUB 3 landmarks: a `cover-image` in the manifest,
+/// one document displaying it, and a nav document.
+fn landmark_book(body: &str) -> Vec<u8> {
+    let opf = opf(
+        "3.0",
+        r#"    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="cov" href="Images/cover.jpeg" media-type="image/jpeg" properties="cover-image"/>
+    <item id="tp" href="titlepage.xhtml" media-type="application/xhtml+xml" properties="svg"/>"#,
+        r#"<itemref idref="tp"/>"#,
+        "",
+    );
+    let titlepage = doc(r#"<div><svg xmlns="http://www.w3.org/2000/svg"
+        xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10">
+        <image width="10" height="10" xlink:href="Images/cover.jpeg"/></svg></div>"#);
+    let nav = doc(r#"<nav epub:type="toc"><ol><li><a href="ch1.xhtml">One</a></li></ol></nav>"#)
+        .replace(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml">"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">"#,
+        );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+        ("OEBPS/nav.xhtml", nav.as_bytes()),
+        ("OEBPS/titlepage.xhtml", titlepage.as_bytes()),
+        ("OEBPS/Images/cover.jpeg", &[0xFF, 0xD8, 0xFF, 0xE0]),
+    ])
+}
+
+/// The NASB case. `epub:type="cover"` is not a hint to interpret — it is a
+/// declaration, and EPUB 3 says where a cover lives: the manifest names the
+/// cover *image*, and the cover *document* is whichever one displays it. So the
+/// link can be repaired rather than merely silenced.
+#[test]
+fn a_cover_landmark_is_repointed_at_the_document_showing_the_cover() {
+    let (outcome, after) = roundtrip_kept(&landmark_book(
+        r#"<nav epub:type="landmarks"><ol>
+        <li><a epub:type="cover" href="kindle:embed:0001?mime=image/jpg">Cover</a></li>
+        </ol></nav>"#,
+    ));
+    let fixed = ch1(&after);
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("repointed 1 dead link")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        fixed.contains(r#"<a epub:type="cover" href="titlepage.xhtml">Cover</a>"#),
+        "{fixed}"
+    );
+    // Repaired, not merely silenced: nothing to report.
+    assert!(outcome.findings.is_empty(), "got {:?}", outcome.findings);
+}
+
+#[test]
+fn a_toc_landmark_is_repointed_at_the_nav_document() {
+    let (_, after) = roundtrip_kept(&landmark_book(
+        r#"<nav epub:type="landmarks"><ol>
+        <li><a epub:type="toc" href="kindle:pos:fid:0000">Contents</a></li>
+        </ol></nav>"#,
+    ));
+    assert!(
+        ch1(&after).contains(r#"href="nav.xhtml">Contents</a>"#),
+        "{}",
+        ch1(&after)
+    );
+}
+
+/// An `epub:type` the package says nothing about stays a removal, because
+/// there is no derivation to make — only a preference.
+#[test]
+fn a_landmark_type_the_package_cannot_locate_is_not_invented() {
+    let (outcome, after) = roundtrip_kept(&landmark_book(
+        r#"<nav epub:type="landmarks"><ol>
+        <li><a epub:type="bodymatter" href="kindle:pos:fid:0009">Start</a></li>
+        </ol></nav>"#,
+    ));
+
+    assert!(!ch1(&after).contains("kindle:"));
+    assert!(!ch1(&after).contains("href="), "{}", ch1(&after));
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("\"Start\"")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+/// `epub:type` is a space-separated list, so `"cover frontmatter"` is a cover.
+#[test]
+fn a_compound_epub_type_still_names_the_cover() {
+    let (_, after) = roundtrip_kept(&landmark_book(
+        r#"<nav epub:type="landmarks"><ol>
+        <li><a epub:type="cover frontmatter" href="kindle:embed:0001">Cover</a></li>
+        </ol></nav>"#,
+    ));
+    assert!(
+        ch1(&after).contains(r#"href="titlepage.xhtml""#),
+        "{}",
+        ch1(&after)
+    );
 }
 
 /// An ordinary body link losing a dead scheme is not a navigation loss, so it
