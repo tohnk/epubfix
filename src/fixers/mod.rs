@@ -21,6 +21,7 @@ use crate::book::Book;
 pub mod anchors;
 pub mod attrs;
 pub mod css_paths;
+pub mod documents;
 pub mod filenames;
 pub mod ids;
 pub mod legacy_html;
@@ -121,6 +122,9 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(opf::DcLanguage {
             policy: opts.language,
         }),
+        // Before xhtml-namespace: a fragment has no root <html> for that
+        // one to put a namespace on, and comes out of this with a proper one.
+        Box::new(documents::FragmentDocuments),
         Box::new(attrs::XhtmlNamespace),
         Box::new(ids::XmlIds),
         // After xml-ids, so a sanitised id that collided with an existing one

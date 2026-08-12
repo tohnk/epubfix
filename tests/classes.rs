@@ -1304,3 +1304,142 @@ fn a_renamed_file_is_not_reported_missing_by_the_closing_scan() {
         outcome.remaining
     );
 }
+
+// ---------------------------------------------------------------------------
+// fragment-documents
+// ---------------------------------------------------------------------------
+
+/// An EPUB 2 book whose `ch1.xhtml` holds `raw` verbatim — no wrapping, no
+/// assumptions — next to a well-formed sibling to copy the house style from.
+fn book_raw(raw: &str) -> Vec<u8> {
+    let opf = opf(
+        "2.0",
+        concat!(
+            r#"    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>"#,
+            "\n",
+            r#"    <item id="css" href="s.css" media-type="text/css"/>"#,
+            "\n",
+            r#"    <item id="img" href="cover.gif" media-type="image/gif"/>"#
+        ),
+        r#"<itemref idref="ch2"/>"#,
+        "",
+    );
+    let ch2 = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
+         <head><title>Two</title>\
+         <link href=\"s.css\" rel=\"stylesheet\" type=\"text/css\"/></head>\n\
+         <body>\n<p>prose</p>\n</body></html>";
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", raw.as_bytes()),
+        ("OEBPS/ch2.xhtml", ch2.as_bytes()),
+        ("OEBPS/s.css", b"p { margin: 0 }"),
+        ("OEBPS/cover.gif", b"GIF89a"),
+    ])
+}
+
+/// The Keats cover: a 45-byte file with no root element at all.
+#[test]
+fn a_bare_markup_fragment_becomes_a_document() {
+    let (outcome, after) = fix(&book_raw(r#"<img alt="Image" src="cover.gif" />"#));
+    let got = ch1(&after);
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("bare markup")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(got.starts_with("<?xml version=\"1.0\""), "got {got}");
+    assert!(got.contains(r#"<html xmlns="http://www.w3.org/1999/xhtml""#), "got {got}");
+    assert!(got.contains("<body>"), "got {got}");
+    assert!(got.contains(r#"<img alt="Image" src="cover.gif" />"#), "got {got}");
+    assert!(outcome.remaining.is_empty(), "got {:?}", outcome.remaining);
+}
+
+/// Wrapping alone trades one epubcheck error for two: XHTML 1.1 wants block
+/// content directly inside `<body>`, and an `<img>` is inline.
+#[test]
+fn a_wrapped_fragment_also_gets_the_block_container() {
+    let (_, after) = fix(&book_raw(r#"<img alt="Image" src="cover.gif" />"#));
+    let got = ch1(&after);
+    let body = got.split_once("<body>").unwrap().1;
+    assert!(
+        body.trim_start().starts_with("<div>"),
+        "the img must not sit bare in the body: {got}"
+    );
+}
+
+/// The `<title>` is not optional — a head without one is itself an RSC-005 —
+/// so it is taken from what the NCX already calls the document.
+#[test]
+fn the_invented_title_comes_from_the_navigation_label() {
+    let (_, after) = fix(&book_raw(r#"<img alt="Image" src="cover.gif" />"#));
+    assert!(ch1(&after).contains("<title>A</title>"), "got {}", ch1(&after));
+}
+
+/// A wrapped cover that lost its stylesheet would render unstyled, which is a
+/// visible regression even though epubcheck is satisfied either way.
+#[test]
+fn the_house_style_is_copied_from_a_sibling_document() {
+    let (_, after) = fix(&book_raw(r#"<img alt="Image" src="cover.gif" />"#));
+    let got = ch1(&after);
+    assert!(got.contains(r#"href="s.css""#), "got {got}");
+    assert!(
+        !got.contains("<title>Two</title>"),
+        "the sibling's title belongs to the sibling: {got}"
+    );
+}
+
+/// The other half of the class: a real document, correctly wrapped, whose body
+/// still holds nothing a body may directly hold.
+#[test]
+fn a_document_whose_body_holds_only_inline_content_gets_a_container() {
+    let raw = doc(r#"<img alt="Image" src="cover.gif"/>"#);
+    let (outcome, after) = fix(&book_raw(&raw));
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("block container")),
+        "got {:?}",
+        outcome.changes
+    );
+    let got = ch1(&after);
+    let body = got.split_once("<body>").unwrap().1;
+    assert!(body.trim_start().starts_with("<div>"), "got {got}");
+    assert!(
+        got.contains("<title>T</title>"),
+        "an existing head is left alone: {got}"
+    );
+}
+
+/// The question is "does this body have *any* block content", never "only".
+/// A chapter with one stray inline child among its paragraphs is the version
+/// mismatch of section 5a, and rewriting the markup to paper over a wrong
+/// package attribute is precisely what this tool must not do.
+#[test]
+fn a_body_with_block_content_is_left_alone_however_stray_its_siblings() {
+    let raw = doc("<p>prose</p>\n<span>stray</span>");
+    let (outcome, after) = fix(&book_raw(&raw));
+
+    assert!(
+        !outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("block container")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert_eq!(ch1(&after), raw, "the document must come out untouched");
+}
+
+#[test]
+fn an_ordinary_document_is_not_mistaken_for_a_fragment() {
+    let raw = doc("<p>prose</p>");
+    let (outcome, after) = fix(&book_raw(&raw));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert_eq!(ch1(&after), raw);
+}

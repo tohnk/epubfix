@@ -33,6 +33,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
 | `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
 | `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
+| `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
 | `content-duplicate-ids` | RSC-005 | makes duplicated ids in a content document unique, keeping the first and leaving referenced ones alone |
@@ -571,11 +572,11 @@ A residual whose subject a finding already named is not printed twice:
 `dangling-resources` declining to delete an `<img>` and the final scan seeing
 the link it left behind are the same defect from two directions.
 
-### The fixture suite, and one deliberate disagreement
+### The fixture suite, and one thing it cannot express
 
-`epubfix-fixtures/run_suite.py` diffs EPUBCheck before and after across eight
-hand-built books. Current result: **7 of 8**, and the eighth is a disagreement
-about policy rather than a defect.
+`epubfix-fixtures/run_suite.py` diffs EPUBCheck before and after across nine
+hand-built books. Current result: **8 of 9**, under a default run and again
+under `--keep-version`.
 
 | Fixture | | |
 | --- | --- | --- |
@@ -585,16 +586,23 @@ about policy rather than a defect.
 | `oebps10-declaration` | 1 → 0 | |
 | `missing-language` | 1 → 0 | `en`, 9 of 11 samples, the two Latin footnote files outvoted |
 | `missing-language-derivable` | 1 → 0 | from `xml:lang`, detection never reached |
-| `epub2-mistagged` | 122 → 0 | **suite says FAIL** |
+| `epub2-mistagged` | 122 → 0 | retagged; `--keep-version` leaves it byte-identical and reports |
+| `fragment-document` | 3 → 0 | **suite says FAIL** |
 
-The suite expects `epub2-mistagged` to be left alone and merely reported, on the
-spec's original rule that changing a book's declared version is opt-in. This
-tool retags by default instead, because the declaration is one attribute and the
-content is thousands of elements — that policy is stated at the top of *Version
-retagging* and it is a deliberate override. The book validates clean afterwards.
+Every book reaches the error count the suite asks for, `fragment-document`
+included. Its FAIL is the suite's `visible text changed` invariant, and it is
+the one place that invariant cannot be satisfied: the check strips tags from the
+*whole file* rather than the body, so it counts `<title>` as visible text, and
+a wrapped fragment must acquire a `<title>` because a `<head>` without one is
+itself an RSC-005 — measured:
 
-`--keep-version` restores exactly what the fixture asks for: the book comes out
-byte-identical, with the mismatch reported rather than repaired.
+```
+element "head" incomplete; missing required element "title"
+```
+
+There is no title that passes, including an empty one, so the fixer is right and
+the check is over-broad. `tests/common/verify.rs` runs the same invariant on the
+same repair and stays quiet, because it suppresses `<head>` before comparing.
 
 Verified end to end against EPUB Check 5.2.1. Fixture books carrying every
 defect above validate with zero errors afterwards, as **both** EPUB 2 (9 errors
@@ -606,6 +614,14 @@ goes from 1 fatal + 11 errors to 0 by being retagged downward.
 *Butcher's Crossing* — the book the path work came from — goes from 3 errors to
 0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
 intact, and the NCX identifier synced.
+
+Three more real books, each the source of one class above, all reach 0. A study
+Bible whose cover landmark pointed at `kindle:embed:0002` goes from 3 to 0, the
+landmark repointed at the cover document the package already identifies rather
+than having its `href` stripped. A *Slaughterhouse-Five* with no `<dc:language>`
+anywhere goes from 2 to 0. And a Penguin *Complete Poems of John Keats* whose
+`cover.html` is 45 bytes — one `<img>`, no root element, no namespace, listed in
+both the manifest and the spine — goes from 2 to 0.
 
 A book carrying every defect from the second sweep at once — duplicated Kobo
 ids, `data-AmznRemoved`, a paragraph that swallowed a `<blockquote>`, a nested
