@@ -43,9 +43,21 @@ use crate::util::{basename, dirname};
 /// Elements that may sit directly inside `<body>` under XHTML 1.1.
 ///
 /// Only used to ask "does this body have *any* block content", so it needs to
-/// be complete in the direction that matters: a name missing from here could
-/// make a real document look like a fragment. Script and template are included
-/// for the same reason, though they are not block content as such.
+/// be complete in the direction that matters: a name missing from here makes a
+/// real document look like a fragment. Script and template are included for the
+/// same reason, though they are not block content as such — an over-long list
+/// only makes this fixer quieter, and a short one makes it wrong.
+///
+/// It was wrong once, and the omission is worth keeping visible. Both cover
+/// documents of a Harper Collins *Hobbit* hold an `<svg>` directly in `<body>`,
+/// which epubcheck accepts and this fixer wrapped in a pointless `<div>`. The
+/// permitted set is quoted verbatim in epubcheck's own message, `svg` included:
+///
+/// ```text
+/// expected element "address", "blockquote", "del", "div", "dl", "h1", "h2",
+/// "h3", "h4", "h5", "h6", "hr", "ins", "noscript", "ns:svg", "ol", "p",
+/// "pre", "script", "table" or "ul"
+/// ```
 const BLOCK: &[&str] = &[
     "address",
     "blockquote",
@@ -70,6 +82,11 @@ const BLOCK: &[&str] = &[
     "table",
     "template",
     "ul",
+    // Foreign-namespace roots, which a body may hold directly in both
+    // rulesets. The scanner matches on the local name, so `<svg:svg>` and a
+    // default-namespaced `<svg>` both land here.
+    "svg",
+    "math",
     // HTML5 sectioning and grouping, so an EPUB 3 document is never mistaken
     // for a fragment.
     "article",

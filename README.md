@@ -550,6 +550,7 @@ a schema mentions somewhere.
 | any absolute-URL `href` is a remote resource | hyperlinks are not; only embedding contexts (`img@src`, `object@data`, …) count |
 | an empty `<dc:*>` is safe to delete | not for the three required ones: absent `<dc:title>` is `metadata incomplete`, a harder error than the empty one |
 | an empty wrapper left by a removed `<img>` is untidy | removing it when it is the body's only child is `element "body" incomplete` |
+| a `<body>` holding only an `<svg>` has no block content | `ns:svg` is in the permitted set epubcheck prints; an SVG cover page is a document, not a fragment |
 
 The first cost five books' worth of pointless entity rewriting, the second 321
 renames in a single book, and the fourth actually *introduced* two OPF-018
@@ -645,7 +646,8 @@ goes from 1 fatal + 11 errors to 0 by being retagged downward.
 0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
 intact, and the NCX identifier synced.
 
-*The Hobbit* is where the last two classes came from. Its metadata is padded
+*The Hobbit* goes from 9 errors to 0 and is where the last two classes came
+from. Its metadata is padded
 with `<dc:date/>`, `<dc:subject/>`, `<dc:description/>` and `<dc:rights/>`, only
 the first of which epubcheck reports — an empty string is not a W3C date, and
 the other three are legal and equally meaningless. And it references
@@ -654,6 +656,13 @@ which is absent from the archive, absent from the manifest, and shares no
 basename with any image that is present. That image was the one defect in a
 37-book sweep that resisted repair, under the rule that an `<img>` is never
 deleted; it is now removed along with the `<p>` it was alone in.
+
+It also caught a false positive on the way, which is the fifth row of the table
+above and the reason the real book matters more than the fixture built from its
+error log. Both of its cover documents hold an `<svg>` directly in `<body>`,
+`BLOCK` did not list `svg`, and `fragment-documents` wrapped two documents
+epubcheck had no complaint about. Only three files are touched now, and they are
+the three with defects in them.
 
 Three more real books, each the source of one class above, all reach 0. A study
 Bible whose cover landmark pointed at `kindle:embed:0002` goes from 3 to 0, the

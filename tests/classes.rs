@@ -1660,3 +1660,56 @@ fn keep_missing_images_restores_the_report() {
         outcome.findings
     );
 }
+
+/// An `<svg>` cover page is a real document, not a fragment.
+///
+/// Both cover documents of a real *Hobbit* hold an `<svg>` directly in
+/// `<body>`. epubcheck accepts that — `ns:svg` is in the permitted set it
+/// prints — and an earlier `BLOCK` list omitted it, so the fixer wrapped two
+/// documents that had nothing wrong with them. The same shape as every other
+/// false positive this tool has had: an inferred content model, not an
+/// observed error.
+#[test]
+fn an_svg_cover_page_is_not_wrapped() {
+    let body = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800">
+<image width="600" height="800" xlink:href="cover.gif"/>
+</svg>"#;
+    let raw = doc(body);
+    let (outcome, after) = fix(&book_raw(&raw));
+
+    assert!(
+        !outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("block container")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert_eq!(ch1(&after), raw, "the cover must come out untouched");
+}
+
+/// Same for `MathML`, the other foreign-namespace root a body may hold.
+///
+/// Unlike SVG, `MathML` really is an error under EPUB 2, so this book retags —
+/// and that is the repair. Wrapping the `<math>` in a `<div>` would not have
+/// made it legal there, so it would have been an edit that fixed nothing.
+#[test]
+fn a_math_element_is_not_wrapped() {
+    let raw = doc(r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi></math>"#);
+    let (outcome, after) = fix(&book_raw(&raw));
+
+    assert!(
+        !outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("block container")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(ch1(&after).contains("<math"), "got {}", ch1(&after));
+    assert!(
+        !ch1(&after).contains("<div>"),
+        "no container was needed: {}",
+        ch1(&after)
+    );
+}
