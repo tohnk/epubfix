@@ -599,6 +599,15 @@ All of that together is still a small fraction of what EPUB Check looks at, so
 counts rather than being left for the reader to infer. Exit status 3 covers this
 as well as findings, so a library sweep can be scripted on it.
 
+A crash counts as a failed book, not a failed run. A comment inside
+`<metadata>` was once enough to abort a sweep partway through, which on a
+library is the worst possible failure: the books after it in the list are
+silently never looked at. Each book is now repaired inside a panic guard, so a
+bug takes down one book and the sweep carries on. Every repair happens in memory
+and the archive is written only at the end, through a temp file and an atomic
+replace, so a crash leaves the book exactly as it was found. This is why the
+release profile does not set `panic = "abort"` — it costs about 100 KB.
+
 A residual whose subject a finding already named is not printed twice:
 `dangling-resources` declining to delete an `<img>` and the final scan seeing
 the link it left behind are the same defect from two directions.

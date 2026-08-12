@@ -1713,3 +1713,37 @@ fn a_math_element_is_not_wrapped() {
         ch1(&after)
     );
 }
+
+/// A comment inside `<metadata>` crashed the whole run on a real book.
+///
+/// `<!-- … -->` has no element name, and the scanner records that as
+/// `name_end == span.start`. Reading the raw name from one byte past the `<`
+/// then asks for an inverted byte range, which panics — and because the sweep
+/// had no guard, one book aborted the entire library.
+#[test]
+fn a_comment_in_the_metadata_does_not_crash_the_run() {
+    let (outcome, after) = fix(&book_meta(
+        "    <!-- calibre metadata -->\n    <dc:date/>",
+    ));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("dc:date")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        opf_of(&after).contains("<!-- calibre metadata -->"),
+        "the comment is not ours to remove: {}",
+        opf_of(&after)
+    );
+}
+
+/// The same shape for the other two nameless node kinds.
+#[test]
+fn a_processing_instruction_in_the_metadata_is_harmless() {
+    let (_, after) = fix(&book_meta(
+        "    <?calibre version=\"1\"?>\n    <dc:rights/>",
+    ));
+    assert!(opf_of(&after).contains("<?calibre"), "got {}", opf_of(&after));
+    assert!(!opf_of(&after).contains("<dc:rights"));
+}

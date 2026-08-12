@@ -24,7 +24,10 @@ tempfile = "3.27.0"
 strip = true
 lto = true
 codegen-units = 1
-panic = "abort"
+# Deliberately not panic = "abort". The tool's job is sweeping a whole library,
+# and a bug that crashes on one book used to take the entire run with it. main()
+# catches a panic per book, reports that one as failed and carries on — which
+# only works if panics unwind.
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

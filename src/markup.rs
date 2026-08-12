@@ -90,6 +90,27 @@ impl Node {
         self.attrs.iter().find(|a| a.name == name)
     }
 
+    /// The element's name exactly as written, namespace prefix and case intact.
+    ///
+    /// [`Node::name`] is the local name, lowercased, which is what almost every
+    /// fixer wants. The exception is deciding whether an element is in a
+    /// particular namespace: `<dc:title>` and `<title>` both come back as
+    /// `title`, and only the raw name says which is which.
+    ///
+    /// Doing that arithmetic at the call site is a trap, and it cost a crash on
+    /// a real book. A comment, DOCTYPE or processing instruction has no name at
+    /// all and carries `name_end == span.start`, so slicing from past the `<`
+    /// gives an inverted range and panics. Here they return `""` instead.
+    pub fn raw_name<'a>(&self, src: &'a str) -> &'a str {
+        let start = match self.kind {
+            // dissect() steps over '<', and over the '/' of an end tag.
+            NodeKind::Start | NodeKind::Empty => self.span.start + 1,
+            NodeKind::End => self.span.start + 2,
+            NodeKind::Other => return "",
+        };
+        src.get(start..self.name_end).unwrap_or("")
+    }
+
     /// The whole element, opening tag through closing tag.
     pub fn element_span(&self, nodes: &[Node]) -> Range<usize> {
         match self.close {

@@ -371,8 +371,14 @@ impl Fixer for EmptyMetadata {
         let mut edits = Edits::new();
         let mut removed: Vec<String> = Vec::new();
 
-        for node in nodes.iter().filter(|n| n.parent == Some(metadata)) {
-            let raw = &text[node.span.start + 1..node.name_end];
+        // Start and Empty only: an end tag is the other half of an element
+        // already considered, and a comment or processing instruction is not an
+        // element at all.
+        for node in nodes
+            .iter()
+            .filter(|n| n.parent == Some(metadata) && matches!(n.kind, NodeKind::Start | NodeKind::Empty))
+        {
+            let raw = node.raw_name(&text);
             let Some(local) = raw.strip_prefix(&format!("{prefix}:")) else {
                 continue;
             };

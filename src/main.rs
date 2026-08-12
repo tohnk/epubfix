@@ -251,6 +251,32 @@ fn default_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Repair one book, turning a crash into an ordinary failure.
+///
+/// A bug that panics on one book must not take the rest of a library sweep with
+/// it, which is what happened on a real one: a comment inside `<metadata>` was
+/// enough to abort a whole run. Every repair happens in memory and the archive
+/// is written only at the end, through a temp file and an atomic replace, so a
+/// panic leaves the book exactly as it was found — all this has to clean up is
+/// a temp file that never got moved into place.
+///
+/// This is why the release profile does not set `panic = "abort"`.
+fn fix_file_guarded(path: &Path, opts: &Options) -> Result<epubfix::Outcome, String> {
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fix_file(path, opts)));
+    match attempt {
+        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => {
+            let mut tmp = path.as_os_str().to_owned();
+            tmp.push(".epubfix.tmp");
+            let _ = std::fs::remove_file(PathBuf::from(tmp));
+            Err("internal error — see the panic above; the book was not modified, and this is \
+                 a bug worth reporting"
+                .to_string())
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args = match parse_args(env::args().skip(1).collect()) {
         Ok(Some(a)) => a,
@@ -290,7 +316,7 @@ fn main() -> ExitCode {
             || p.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        match fix_file(p, &args.opts) {
+        match fix_file_guarded(p, &args.opts) {
             Ok(outcome) => {
                 match report_book(&name, &outcome, args.opts.dry_run) {
                     true => fixed += 1,
