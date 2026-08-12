@@ -29,10 +29,13 @@ Done: 1 fixed, 1 already clean, 0 failed.
 
 | Fixer | epubcheck | What it does |
 | --- | --- | --- |
+| `encoding` | CSS-003, CSS-004, RSC-027, RSC-028, HTM-058 | re-encodes a UTF-16 text entry as UTF-8 and corrects what it declares |
 | `mimetype` | PKG-005, PKG-006, PKG-007 | puts the OCF `mimetype` entry first, uncompressed, with exactly the required bytes |
+| `container-rootfile` | OPF-016, OPF-017 | points `container.xml` at the package document when its `full-path` is missing or empty |
 | `opf-version` | OPF-001 | `<package version="1.0">` (OEBPS 1.0) → `"2.0"` |
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
-| `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
+| `media-types` | CSS-007, OPF-035, OPF-037 | replaces a manifest `media-type` that is mistyped or superseded |
+| `manifest-items` | OPF-091, OPF-099 | drops a fragment from a manifest `href`, and the entry a manifest makes for itself |
 | `empty-metadata` | OPF-054 | removes `<dc:*>` elements with no content, keeping the three both versions require |
 | `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
 | `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
@@ -52,9 +55,10 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
 | `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
+| `reference-fragments` | RSC-009, RSC-013 | drops a fragment from a reference to a stylesheet or raster image, which cannot have one |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-pagelist-attrs` | RSC-005 | completes the co-required `id`/`class` pair on a `<pageList>` that carries only one |
-| `filenames` | PKG-009, PKG-010, RSC-020 | renames resources whose filenames a URL cannot address, and updates every reference, raw or percent-encoded |
+| `filenames` | PKG-009, PKG-010, PKG-011, OPF-060, RSC-020 | renames resources whose filenames a URL cannot address — illegal characters, a trailing dot, or two entries differing only by case — and updates every reference |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |
 | `ncx-uid` | NCX-001 | syncs `dtb:uid` to the OPF `unique-identifier`, byte for byte |
 | `version-mismatch` | RSC-005 | reports markup that does not match the declared version, where the evidence is too weak to retag on — diagnostic only |
@@ -650,6 +654,53 @@ release profile does not set `panic = "abort"` — it costs about 100 KB.
 A residual whose subject a finding already named is not printed twice:
 `dangling-resources` declining to delete an `<img>` and the final scan seeing
 the link it left behind are the same defect from two directions.
+
+### Working from epubcheck's catalogue instead of from broken books
+
+Every fixer above up to this point came from a book that failed: find the
+error, work backwards to the cause, write the repair. That reaches the *dense*
+part of the distribution — across eight real books the errors were almost
+entirely RSC-005, RSC-007, NCX-001 and OPF-054 — but it can only ever find
+defects that happen to be in the library.
+
+The later ones came from working down epubcheck's own message catalogue
+correlated against its call sites. The argument for it is the `mimetype` fixer:
+`save()` had *always* written a correct OCF mimetype entry, so any book this
+tool rewrote came out right — but nothing noticed the condition, so a book whose
+only defect was its mimetype drew `nothing to do`, was never rewritten, and kept
+both errors. The repair existed and could not reach disk. No book in the library
+has that defect, and one with it would have been quietly returned unrepaired.
+
+The method has one rule, and it is the same rule as everywhere else here. The
+catalogue tells you **what to measure, not what is true**. Building a fixture for
+each code and running epubcheck against it corrected three guesses out of
+fourteen before a line of Rust was written:
+
+| what the call site suggested | what EPUB Check 5.2.1 actually did |
+| --- | --- |
+| an XHTML 1.0 DOCTYPE in EPUB 3 is HTM-009 | HTM-004, a different code with a different repair — HTM-009 never reproduced, so it was dropped |
+| a UTF-16 XHTML document is HTM-058 | nothing at all; the fatal case is UTF-16 bytes under a `utf-8` declaration, `RSC-016` |
+| a filename *containing* a dot is PKG-011 | only a filename whose **last** character is a dot |
+
+The same pass found a live bug by accident. A probe for RSC-009 used an SVG
+image, and the run turned a clean book into two errors: manifest properties were
+derived for *every* item, and an `.svg` file is readable text, so the image was
+handed `properties="svg"`. Measured, the rule is per-property, not per-item:
+
+| `properties` on an `image/svg+xml` item | |
+| --- | --- |
+| none | **OPF-014** — `remote-resources` should be declared |
+| `remote-resources` | clean |
+| `svg` | **OPF-012** + OPF-015 |
+
+So `svg`, `mathml` and `scripted` describe an XHTML content document and are
+undefined anywhere else, while `remote-resources` belongs on anything that can
+reference something remote.
+
+Two codes on the shortlist were deliberately **not** implemented. PKG-012
+(non-ASCII filenames) is USAGE severity and renaming for it is precisely the
+321-rename false positive above. RSC-029 (`data:` URLs) cannot be mechanically
+repaired, because the data *is* the content.
 
 ### The fixture suite, and one thing it cannot express
 

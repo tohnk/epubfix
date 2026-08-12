@@ -9,7 +9,7 @@ mod common;
 use std::fmt::Write as _;
 
 use common::verify::verify;
-use common::{entry, has, make_epub, read_epub, roundtrip_full, roundtrip_kept};
+use common::{entry, has, make_epub, names, read_epub, roundtrip_full, roundtrip_kept};
 
 const CONTAINER: &str = common::CONTAINER;
 
@@ -2163,6 +2163,295 @@ fn a_correct_mimetype_entry_draws_no_comment() {
     let (outcome, _) = fix(&book2("<p>text</p>"));
     assert!(
         !outcome.changes.iter().any(|c| c.contains("mimetype")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Derived from epubcheck's message catalogue rather than from a broken book.
+// Every trigger below was confirmed against EPUB Check 5.2.1 first.
+// ---------------------------------------------------------------------------
+
+/// A book with `extra` appended to its manifest.
+fn book_manifest(extra: &str) -> Vec<u8> {
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", extra, "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+        ("OEBPS/s.css", b"p { margin: 0 }"),
+        ("OEBPS/i.gif", b"GIF89a"),
+    ])
+}
+
+/// OPF-035 and OPF-037: media types that have been superseded.
+#[test]
+fn superseded_media_types_are_replaced() {
+    let (outcome, after) = fix(&book_manifest(
+        r#"    <item id="c" href="s.css" media-type="text/x-oeb1-css"/>"#,
+    ));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("media-type")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(opf_of(&after).contains(r#"media-type="text/css""#));
+}
+
+/// The match is on the whole value: a type that merely starts the same way is
+/// a different type and must not be rewritten.
+#[test]
+fn a_media_type_that_only_looks_similar_is_left_alone() {
+    let (outcome, after) = fix(&book_manifest(
+        r#"    <item id="c" href="s.css" media-type="text/html-fragment"/>"#,
+    ));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert!(opf_of(&after).contains(r#"media-type="text/html-fragment""#));
+}
+
+/// OPF-091: a manifest entry names a file, so it cannot carry a fragment.
+#[test]
+fn a_fragment_on_a_manifest_href_is_dropped() {
+    let (outcome, after) = fix(&book_manifest(
+        r#"    <item id="i" href="i.gif#part" media-type="image/gif"/>"#,
+    ));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("fragment")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(opf_of(&after).contains(r#"href="i.gif""#), "{}", opf_of(&after));
+}
+
+/// OPF-099: a manifest is the list of everything else.
+#[test]
+fn the_manifest_entry_for_the_package_document_is_removed() {
+    let (outcome, after) = fix(&book_manifest(
+        r#"    <item id="self" href="content.opf" media-type="application/oebps-package+xml"/>"#,
+    ));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("package document")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!opf_of(&after).contains("content.opf"), "{}", opf_of(&after));
+}
+
+/// RSC-013 and RSC-009: a fragment on a target that has nothing inside it.
+#[test]
+fn inert_fragments_on_stylesheets_and_rasters_are_dropped() {
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        (
+            "OEBPS/content.opf",
+            opf(
+                "2.0",
+                concat!(
+                    r#"    <item id="c" href="s.css" media-type="text/css"/>"#,
+                    "\n",
+                    r#"    <item id="i" href="i.gif" media-type="image/gif"/>"#
+                ),
+                "",
+                "",
+            )
+            .as_bytes(),
+        ),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        (
+            "OEBPS/ch1.xhtml",
+            doc(concat!(
+                r#"<p><img src="i.gif#x" alt="x"/></p>"#,
+                r#"<p><a href="s.css#top">s</a></p>"#
+            ))
+            .as_bytes(),
+        ),
+        ("OEBPS/s.css", b"p { margin: 0 }"),
+        ("OEBPS/i.gif", b"GIF89a"),
+    ]));
+
+    let got = ch1(&after);
+    assert!(got.contains(r#"src="i.gif""#), "got {got}");
+    assert!(got.contains(r#"href="s.css""#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("inert fragment")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// An SVG really is a document with ids in it, so its fragments stay.
+#[test]
+fn a_fragment_on_an_svg_is_kept() {
+    let svg = r#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect id="r" width="10" height="10"/></svg>"#;
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        (
+            "OEBPS/content.opf",
+            opf(
+                "2.0",
+                r#"    <item id="i" href="i.svg" media-type="image/svg+xml"/>"#,
+                "",
+                "",
+            )
+            .as_bytes(),
+        ),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        (
+            "OEBPS/ch1.xhtml",
+            doc(r#"<p><img src="i.svg#r" alt="x"/></p>"#).as_bytes(),
+        ),
+        ("OEBPS/i.svg", svg.as_bytes()),
+    ]));
+    assert!(ch1(&after).contains(r#"src="i.svg#r""#), "got {}", ch1(&after));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+}
+
+/// OPF-016 and OPF-017: container.xml with no usable `full-path`. The answer is
+/// in the archive — the package document is right there.
+#[test]
+fn a_container_with_no_rootfile_path_is_pointed_at_the_package() {
+    for rootfile in [
+        r#"<rootfile media-type="application/oebps-package+xml"/>"#,
+        r#"<rootfile full-path="" media-type="application/oebps-package+xml"/>"#,
+    ] {
+        let container = CONTAINER.replace(
+            r#"<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>"#,
+            rootfile,
+        );
+        let (outcome, after) = fix(&make_epub(&[
+            ("META-INF/container.xml", container.as_bytes()),
+            ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+            ("OEBPS/toc.ncx", NCX.as_bytes()),
+            ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+        ]));
+
+        assert!(
+            outcome.changes.iter().any(|c| c.contains("rootfile")),
+            "{rootfile}: got {:?}",
+            outcome.changes
+        );
+        assert!(
+            entry(&after, "META-INF/container.xml").contains(r#"full-path="OEBPS/content.opf""#),
+            "{rootfile}: got {}",
+            entry(&after, "META-INF/container.xml")
+        );
+    }
+}
+
+/// PKG-011: a name may not end with a full stop.
+#[test]
+fn a_filename_ending_in_a_dot_is_renamed_and_its_references_follow() {
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        (
+            "OEBPS/content.opf",
+            opf(
+                "2.0",
+                r#"    <item id="i" href="pic." media-type="image/gif"/>"#,
+                "",
+                "",
+            )
+            .as_bytes(),
+        ),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        (
+            "OEBPS/ch1.xhtml",
+            doc(r#"<p><img src="pic." alt="x"/></p>"#).as_bytes(),
+        ),
+        ("OEBPS/pic.", b"GIF89a"),
+    ]));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("renamed")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(has(&after, "OEBPS/pic"), "got {:?}", names(&after));
+    assert!(ch1(&after).contains(r#"src="pic""#), "got {}", ch1(&after));
+}
+
+/// OPF-060: two entries that differ only by case are one name to OCF. The
+/// first in archive order keeps it.
+#[test]
+fn entries_differing_only_by_case_are_made_distinct() {
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        (
+            "OEBPS/content.opf",
+            opf(
+                "2.0",
+                concat!(
+                    r#"    <item id="i" href="Pic.gif" media-type="image/gif"/>"#,
+                    "\n",
+                    r#"    <item id="j" href="pic.gif" media-type="image/gif"/>"#
+                ),
+                "",
+                "",
+            )
+            .as_bytes(),
+        ),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        (
+            "OEBPS/ch1.xhtml",
+            doc(r#"<p><img src="Pic.gif" alt="x"/><img src="pic.gif" alt="y"/></p>"#).as_bytes(),
+        ),
+        ("OEBPS/Pic.gif", b"GIF89a"),
+        ("OEBPS/pic.gif", b"GIF89b"),
+    ]));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("renamed")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(has(&after, "OEBPS/Pic.gif"), "the first one keeps its name");
+    assert!(!has(&after, "OEBPS/pic.gif"), "got {:?}", names(&after));
+    assert!(ch1(&after).contains(r#"src="Pic.gif""#), "got {}", ch1(&after));
+}
+
+/// CSS-003 and the fatal shape: a UTF-16 entry, re-encoded and re-declared.
+#[test]
+fn a_utf16_entry_is_re_encoded_as_utf8() {
+    let css: Vec<u8> = {
+        let s = "@charset \"utf-16\";\np { margin: 0 }";
+        let mut v = vec![0xFF, 0xFE];
+        v.extend(s.encode_utf16().flat_map(u16::to_le_bytes));
+        v
+    };
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        (
+            "OEBPS/content.opf",
+            opf(
+                "2.0",
+                r#"    <item id="c" href="s.css" media-type="text/css"/>"#,
+                "",
+                "",
+            )
+            .as_bytes(),
+        ),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+        ("OEBPS/s.css", &css),
+    ]));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("UTF-16")),
+        "got {:?}",
+        outcome.changes
+    );
+    let out = entry(&after, "OEBPS/s.css");
+    assert!(out.contains("@charset \"utf-8\";"), "got {out}");
+    assert!(out.contains("margin: 0"), "the rules survive: {out}");
+}
+
+/// A UTF-8 book must not be re-encoded, or every book would be rewritten.
+#[test]
+fn a_utf8_book_is_not_re_encoded() {
+    let (outcome, _) = fix(&book2("<p>text</p>"));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("UTF-16")),
         "got {:?}",
         outcome.changes
     );

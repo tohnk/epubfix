@@ -795,6 +795,93 @@ impl Fixer for OrphanLinks {
     }
 }
 
+/// RSC-009 and RSC-013: a fragment on a reference whose target cannot have one.
+///
+/// Two epubcheck codes, one defect and one repair, which is why they are one
+/// fixer:
+///
+/// ```text
+/// RSC-013  <link rel="stylesheet" href="s.css#top">   fragment on a stylesheet
+/// RSC-009  <img src="cover.gif#x">                    fragment on a raster image
+/// ```
+///
+/// Neither target has anything a fragment could address. A stylesheet has no
+/// ids; a GIF, JPEG or PNG has no internal structure a URL can name. The
+/// fragment is inert — the reference already resolves to the whole file and
+/// will carry on doing so — so dropping it changes nothing but the error.
+///
+/// SVG is the exception and the reason this is not simply "images have no
+/// fragments": an SVG *is* a document with ids in it, and `cover.svg#logo` is a
+/// legitimate reference to part of one. Measured — the same book with an SVG
+/// target instead of a GIF validates clean.
+pub struct ReferenceFragments;
+
+/// Targets a fragment can address nothing inside: a stylesheet, which has no
+/// ids, and the raster image formats, which have no internal structure a URL
+/// can name. `.svg` is deliberately absent — see above.
+const STRIPPABLE: &[&str] = &[
+    ".css", ".gif", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff",
+];
+
+impl Fixer for ReferenceFragments {
+    fn name(&self) -> &'static str {
+        "reference-fragments"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-009", "RSC-013"]
+    }
+    fn description(&self) -> &'static str {
+        "drop a fragment from a reference to a stylesheet or a raster image, which cannot have one"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let present: Vec<String> = book.names().to_vec();
+        let mut stripped = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for node in &nodes {
+                for attr in node.attrs.iter().filter(|a| is_reference(a)) {
+                    let Some((target, Some(_))) = resolve_href(&doc, &attr.value) else {
+                        continue;
+                    };
+                    // Only a target that is really there: a fragment on a
+                    // missing file is a different defect with a different
+                    // repair, and dangling-resources owns it.
+                    if !present.contains(&target) {
+                        continue;
+                    }
+                    // Already lowercased, so a plain suffix test is the
+                    // case-insensitive one.
+                    let lower = target.to_ascii_lowercase();
+                    if !ends_with_any(&lower, STRIPPABLE) {
+                        continue;
+                    }
+                    let path = attr.value.split_once('#').map_or("", |(p, _)| p);
+                    edits.replace(attr.span.clone(), format!("{}=\"{path}\"", attr.name));
+                    stripped += 1;
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if stripped == 0 {
+            return Outcome::none();
+        }
+        Outcome::change(format!(
+            "dropped {stripped} inert fragment(s) from references to files that cannot have them"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod scheme_tests {
     use super::scheme_of;

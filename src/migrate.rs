@@ -673,6 +673,33 @@ fn modernise_dc_metadata(
 /// untouched.
 const DERIVED: &[&str] = &["mathml", "remote-resources", "scripted", "svg"];
 
+/// Which media types each derived property is defined for.
+///
+/// Not a refinement — a correctness rule, measured. Every manifest item used to
+/// be scanned and given whatever its bytes earned, and an `.svg` file is
+/// readable text, so an SVG image was handed `properties="svg"`:
+///
+/// ```text
+/// properties on an image/svg+xml item     epubcheck
+/// (none)                                  OPF-014: remote-resources should be declared
+/// remote-resources                        clean
+/// svg                                     OPF-012 + OPF-015
+/// ```
+///
+/// So the split is per *property*, not per item: `svg`, `mathml` and `scripted`
+/// describe an XHTML content document and are undefined anywhere else, while
+/// `remote-resources` describes any item that can reference something remote —
+/// an SVG that pulls in a remote image genuinely needs it.
+fn property_applies(property: &str, media_type: &str) -> bool {
+    match property {
+        "remote-resources" => matches!(
+            media_type,
+            "application/xhtml+xml" | "image/svg+xml" | "text/css"
+        ),
+        _ => media_type == "application/xhtml+xml",
+    }
+}
+
 /// Make every manifest item's derived properties match what its document now
 /// contains.
 ///
@@ -718,9 +745,13 @@ pub fn finalise_properties(book: &mut Book) -> Outcome {
             continue;
         };
 
+        let media_type = node.attr("media-type").map_or("", |a| a.value.as_str());
         let existing = node.attr("properties");
         let was: Vec<&str> = existing.map_or(Vec::new(), |a| a.value.split_whitespace().collect());
-        let earned = document_properties(doc);
+        let earned: Vec<&'static str> = document_properties(doc)
+            .into_iter()
+            .filter(|p| property_applies(p, media_type))
+            .collect();
 
         // Keep everything this module does not own, then add what the finished
         // document actually earns.

@@ -76,7 +76,7 @@ fn doubled_font_media_type_is_corrected() {
         opf,
     )));
 
-    assert_eq!(changes, vec!["corrected font media-type"]);
+    assert_eq!(changes, vec!["corrected 1 manifest media-type(s) [application/application/x-font-ttf]"]);
     assert!(
         entry(&out, "OEBPS/content.opf").contains(r#"media-type="application/vnd.ms-opentype""#)
     );

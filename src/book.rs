@@ -39,6 +39,33 @@ pub struct Book {
     ncx: Option<String>,
     /// What the current pass overwrote, so it can be rolled back alone.
     undo: HashMap<String, String>,
+    /// Entries that arrived as UTF-16 and were decoded on the way in.
+    transcoded: Vec<String>,
+}
+
+/// Decode UTF-16 with a byte-order mark, which is the only form that turns up:
+/// an EPUB entry without one is UTF-8 by definition, so a BOM is what makes
+/// this unambiguous rather than a guess about odd-looking bytes.
+fn from_utf16(data: &[u8]) -> Option<String> {
+    let (rest, big) = match data.get(..2)? {
+        [0xFE, 0xFF] => (&data[2..], true),
+        [0xFF, 0xFE] => (&data[2..], false),
+        _ => return None,
+    };
+    if rest.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = rest
+        .chunks_exact(2)
+        .map(|c| {
+            if big {
+                u16::from_be_bytes([c[0], c[1]])
+            } else {
+                u16::from_le_bytes([c[0], c[1]])
+            }
+        })
+        .collect();
+    String::from_utf16(&units).ok()
 }
 
 impl Book {
@@ -67,14 +94,19 @@ impl Book {
 
         let order: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
 
-        // Anything that fails to decode as UTF-8 is left byte-for-byte alone.
+        // UTF-8 first, then UTF-16 by its byte-order mark. Anything that is
+        // neither is left byte-for-byte alone.
         let mut texts = HashMap::new();
+        let mut transcoded = Vec::new();
         for e in &entries {
-            if !e.is_dir
-                && ends_with_any(&e.name, TEXTUAL)
-                && let Ok(s) = std::str::from_utf8(&e.data)
-            {
+            if e.is_dir || !ends_with_any(&e.name, TEXTUAL) {
+                continue;
+            }
+            if let Ok(s) = std::str::from_utf8(&e.data) {
                 texts.insert(e.name.clone(), s.to_owned());
+            } else if let Some(s) = from_utf16(&e.data) {
+                texts.insert(e.name.clone(), s);
+                transcoded.push(e.name.clone());
             }
         }
 
@@ -95,6 +127,7 @@ impl Book {
             opf,
             ncx,
             undo: HashMap::new(),
+            transcoded,
         })
     }
 
@@ -230,6 +263,15 @@ impl Book {
         let stored = entry.is_some_and(|e| e.compression == CompressionMethod::Stored);
         let exact = entry.is_some_and(|e| e.data == b"application/epub+zip");
         (first, stored, exact)
+    }
+
+    /// Entries that arrived as UTF-16 and are now held as text.
+    ///
+    /// [`Book::save`] writes every text entry as UTF-8, so these are already
+    /// repaired in memory — but as with the mimetype, nothing would notice, and
+    /// a book whose only defect was its encoding would never be rewritten.
+    pub fn transcoded(&self) -> &[String] {
+        &self.transcoded
     }
 
     /// Entry names in archive order.

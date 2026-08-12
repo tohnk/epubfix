@@ -31,6 +31,9 @@
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
 use crate::util::{basename, dirname};
@@ -85,6 +88,12 @@ fn needs_encoding(c: char) -> bool {
 /// were losses with nothing bought, so the name now survives everything except
 /// the offending characters themselves.
 fn safe_filename(base: &str) -> String {
+    // PKG-011: a trailing FULL STOP is illegal outright, and repeated ones are
+    // still one name ending in a dot, so they all go before anything else runs.
+    let base = base.trim_end_matches('.');
+    if base.is_empty() {
+        return "file".to_string();
+    }
     let (stem, ext) = match base.rfind('.') {
         // Mirrors Python's rpartition('.'): a leading dot is part of the stem.
         Some(i) if i > 0 => (&base[..i], &base[i + 1..]),
@@ -120,7 +129,20 @@ fn safe_filename(base: &str) -> String {
 /// broken reference, and the raw basename is exactly what we would have to find
 /// to rewrite it — so the test and the repair look at the same thing.
 fn needs_rename(base: &str, raw_reference: impl Fn(&str) -> bool) -> bool {
-    base.chars().any(is_forbidden) || (base.chars().any(needs_encoding) && raw_reference(base))
+    base.ends_with('.')
+        || base.chars().any(is_forbidden)
+        || (base.chars().any(needs_encoding) && raw_reference(base))
+}
+
+/// The key OCF compares two entry names by: OPF-060 requires them to be unique
+/// "after Unicode canonical normalization and full case folding", so `Pic.gif`
+/// and `pic.gif` are the same name however different they look in a listing.
+///
+/// `to_lowercase` is Unicode-aware and is the same comparison for every name a
+/// book is likely to hold; it is used only to *find* a collision, and the
+/// repair is a rename that removes any doubt.
+fn folded(name: &str) -> String {
+    name.to_lowercase()
 }
 
 pub struct UnsafeFilenames;
@@ -164,6 +186,38 @@ impl Fixer for UnsafeFilenames {
                 });
             }
             planned.push((name.clone(), candidate));
+        }
+
+        // OPF-060: two entries that differ only by case are one name as far as
+        // OCF is concerned. This is a condition on a *pair*, so it cannot live
+        // in needs_rename with the rest; the first entry in archive order keeps
+        // its name and any later one that folds onto it is renamed.
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for name in book.names() {
+            if name.ends_with('/') {
+                continue;
+            }
+            let after = planned
+                .iter()
+                .find(|(old, _)| old == name)
+                .map_or(name.clone(), |(_, new)| new.clone());
+            match seen.entry(folded(&after)) {
+                Entry::Vacant(v) => {
+                    v.insert(after);
+                }
+                Entry::Occupied(_) => {
+                    let candidate = uniquify(&after, |c| {
+                        book.name_taken(c)
+                            || seen.contains_key(&folded(c))
+                            || planned.iter().any(|(_, n)| n == c)
+                    });
+                    seen.insert(folded(&candidate), candidate.clone());
+                    match planned.iter_mut().find(|(old, _)| old == name) {
+                        Some(slot) => slot.1 = candidate,
+                        None => planned.push((name.clone(), candidate)),
+                    }
+                }
+            }
         }
 
         if planned.is_empty() {

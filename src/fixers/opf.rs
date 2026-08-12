@@ -80,28 +80,167 @@ impl Fixer for SpinePageMap {
     }
 }
 
-/// CSS-007: a doubled `application/` prefix on the TrueType font media type.
-pub struct FontMediaType;
+/// CSS-007, OPF-035, OPF-037: a manifest `media-type` that is wrong or
+/// superseded.
+///
+/// Three epubcheck codes, one repair — replace the declared type with the one
+/// that means the same thing today — so they are one fixer rather than three.
+/// The mapping is a fixed table, and every entry is a rename with no judgement
+/// in it: the resource is unchanged and only the label the package puts on it
+/// moves to the current spelling.
+///
+/// * **CSS-007** is a doubled prefix, `application/application/x-font-ttf`,
+///   which is simply a typo some tool wrote.
+/// * **OPF-035** is `text/html` in an EPUB 2 package, where content documents
+///   are XHTML and must say so.
+/// * **OPF-037** is the OEBPS 1.2 vocabulary — `text/x-oeb1-document` and
+///   `text/x-oeb1-css` — left behind by a converter.
+///
+/// Measured: each of the three validates clean once the type is corrected.
+pub struct MediaTypes;
 
-const BAD_FONT_TYPE: &str = "application/application/x-font-ttf";
-const GOOD_FONT_TYPE: &str = "application/vnd.ms-opentype";
+/// `wrong media type -> what it means now`.
+const MEDIA_TYPES: &[(&str, &str)] = &[
+    // CSS-007: a doubled prefix, and the modern spelling of the font type.
+    ("application/application/x-font-ttf", "application/vnd.ms-opentype"),
+    // OPF-037: the OEBPS 1.2 vocabulary.
+    ("text/x-oeb1-document", "application/xhtml+xml"),
+    ("text/x-oeb1-css", "text/css"),
+    // OPF-035: HTML where an EPUB wants XHTML.
+    ("text/html", "application/xhtml+xml"),
+];
 
-impl Fixer for FontMediaType {
+impl Fixer for MediaTypes {
     fn name(&self) -> &'static str {
-        "font-media-type"
+        "media-types"
     }
     fn codes(&self) -> &'static [&'static str] {
-        &["CSS-007"]
+        &["CSS-007", "OPF-035", "OPF-037"]
     }
     fn description(&self) -> &'static str {
-        r#"fix the "application/application/x-font-ttf" typo"#
+        "replace a manifest media-type that is mistyped or superseded"
     }
+
     fn apply(&self, book: &mut Book) -> Outcome {
-        if edit_opf(book, |t| t.replace(BAD_FONT_TYPE, GOOD_FONT_TYPE)) {
-            Outcome::change("corrected font media-type")
-        } else {
-            Outcome::none()
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+
+        let mut edits = Edits::new();
+        let mut fixed: Vec<String> = Vec::new();
+
+        for node in nodes.iter().filter(|n| n.name == "item") {
+            let Some(attr) = node.attr("media-type") else {
+                continue;
+            };
+            // Exact match on the whole attribute value. A substring rewrite
+            // would turn "text/html-something" into nonsense.
+            let Some((_, right)) = MEDIA_TYPES
+                .iter()
+                .find(|(wrong, _)| attr.value.trim() == *wrong)
+            else {
+                continue;
+            };
+            edits.replace(attr.span.clone(), format!("media-type=\"{right}\""));
+            fixed.push(attr.value.trim().to_string());
         }
+
+        if fixed.is_empty() {
+            return Outcome::none();
+        }
+        book.set_text(&opf_name, edits.apply(&text));
+        let count = fixed.len();
+        fixed.sort();
+        fixed.dedup();
+        Outcome::change(format!(
+            "corrected {count} manifest media-type(s) [{}]",
+            fixed.join(", ")
+        ))
+    }
+}
+
+/// OPF-091 and OPF-099: manifest items that cannot mean what they say.
+///
+/// Both are the package document describing itself wrongly, and both have one
+/// right answer, so they share a fixer.
+///
+/// **OPF-091** — `<item href="chapter.xhtml#part2">`. A manifest entry names a
+/// *resource*, and a fragment names something inside one, so the two cannot be
+/// combined: there is no file called `chapter.xhtml#part2`. Dropping the
+/// fragment leaves the item pointing at the file it was always about, and it
+/// takes an RSC-001 and an RSC-008 with it, since the phantom filename was also
+/// being reported as missing and undeclared.
+///
+/// **OPF-099** — the manifest listing the package document itself. A manifest
+/// is the list of everything *else*; the OPF is what does the listing, and an
+/// entry for it describes nothing. Removing that one entry is the whole repair.
+pub struct ManifestItems;
+
+impl Fixer for ManifestItems {
+    fn name(&self) -> &'static str {
+        "manifest-items"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["OPF-091", "OPF-099"]
+    }
+    fn description(&self) -> &'static str {
+        "drop a fragment from a manifest href, and the entry a manifest makes for itself"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+
+        let mut edits = Edits::new();
+        let (mut trimmed, mut dropped) = (0u32, 0u32);
+
+        for node in nodes.iter().filter(|n| n.name == "item") {
+            let Some(href) = node.attr("href") else {
+                continue;
+            };
+            let Some((target, fragment)) = resolve_href(&opf_name, &href.value) else {
+                continue;
+            };
+            if target == opf_name {
+                edits.delete(line_span(&text, node.element_span(&nodes)));
+                dropped += 1;
+            } else if fragment.is_some() {
+                let path = href.value.split_once('#').map_or("", |(p, _)| p);
+                edits.replace(href.span.clone(), format!("href=\"{path}\""));
+                trimmed += 1;
+            }
+        }
+
+        if trimmed == 0 && dropped == 0 {
+            return Outcome::none();
+        }
+        book.set_text(&opf_name, edits.apply(&text));
+
+        let mut outcome = Outcome::none();
+        if trimmed > 0 {
+            outcome.push_change(format!(
+                "dropped the fragment from {trimmed} manifest href(s), which name files"
+            ));
+        }
+        if dropped > 0 {
+            outcome.push_change(format!(
+                "removed {dropped} manifest entr(ies) for the package document itself"
+            ));
+        }
+        outcome
     }
 }
 
@@ -481,4 +620,151 @@ impl Fixer for MimetypeEntry {
         }
         Outcome::change(format!("rewrote the mimetype entry, which {}", wrong.join(" and ")))
     }
+}
+
+/// OPF-016 and OPF-017: `<rootfile>` with no usable `full-path`.
+///
+/// `META-INF/container.xml` is how a reading system finds the package document,
+/// and its `full-path` is the only thing in the archive that says where that
+/// is. Missing (OPF-016) or empty (OPF-017), nothing can open the book — both
+/// come with RSC-003, "no rootfile tag with media type
+/// application/oebps-package+xml was found".
+///
+/// It is repairable because the answer is in the archive: there is a package
+/// document, and this tool has already found it — by extension, which is how it
+/// can read a book whose container is broken in the first place. Writing that
+/// path into the attribute is not a guess, it is copying down where the file
+/// actually is.
+///
+/// Only when exactly one package document exists. A multiple-rendition EPUB has
+/// several and which one is primary is a real decision, so that is reported.
+pub struct ContainerRootfile;
+
+const CONTAINER: &str = "META-INF/container.xml";
+
+impl Fixer for ContainerRootfile {
+    fn name(&self) -> &'static str {
+        "container-rootfile"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["OPF-016", "OPF-017"]
+    }
+    fn description(&self) -> &'static str {
+        "point container.xml at the package document when its full-path is missing or empty"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(CONTAINER).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+
+        let packages: Vec<&String> = book
+            .names()
+            .iter()
+            .filter(|n| n.to_ascii_lowercase().ends_with(".opf"))
+            .collect();
+        if packages.len() > 1 {
+            return Outcome::finding(format!(
+                "container.xml has no usable full-path and the book holds {} package documents, \
+                 so which one is the rendition to open is a real choice and not ours",
+                packages.len()
+            ));
+        }
+
+        let mut edits = Edits::new();
+        let mut fixed = 0u32;
+
+        for node in nodes.iter().filter(|n| n.name == "rootfile") {
+            match node.attr("full-path") {
+                // Present and pointing somewhere: not ours.
+                Some(a) if !a.value.trim().is_empty() => continue,
+                Some(a) => edits.replace(a.span.clone(), format!("full-path=\"{opf_name}\"")),
+                // Absent: add it, just after the element name.
+                None => edits.insert(node.name_end, format!(" full-path=\"{opf_name}\"")),
+            }
+            fixed += 1;
+        }
+
+        if fixed == 0 {
+            return Outcome::none();
+        }
+        book.set_text(CONTAINER, edits.apply(&text));
+        Outcome::change(format!(
+            "pointed {fixed} container rootfile(s) at \"{opf_name}\", where the package document is"
+        ))
+    }
+}
+
+/// CSS-003, CSS-004, RSC-027, RSC-028, HTM-058: a text entry that is not UTF-8.
+///
+/// EPUB requires UTF-8 for every XML and CSS resource. A tool that wrote UTF-16
+/// leaves a file no reading system has to accept, and if the file also *declares*
+/// itself UTF-8 — which happens, because the declaration is boilerplate the tool
+/// did not update — the mismatch is fatal rather than merely wrong. Measured on
+/// that shape: `FATAL(RSC-016)`, and epubcheck stops reading the file.
+///
+/// [`Book`] decodes UTF-16 on the way in and [`Book::save`] writes every text
+/// entry as UTF-8, so the bytes are already right by the time this runs. What is
+/// left is the declaration that still says otherwise, and saying so — without a
+/// reported change the book is never rewritten and the repair never lands, the
+/// same trap as the mimetype entry.
+pub struct Encoding;
+
+impl Fixer for Encoding {
+    fn name(&self) -> &'static str {
+        "encoding"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["CSS-003", "CSS-004", "RSC-027", "RSC-028", "HTM-058"]
+    }
+    fn description(&self) -> &'static str {
+        "re-encode a UTF-16 text entry as UTF-8, and correct what it declares"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let names: Vec<String> = book.transcoded().to_vec();
+        if names.is_empty() {
+            return Outcome::none();
+        }
+
+        for name in &names {
+            let Some(text) = book.text(name).map(str::to_owned) else {
+                continue;
+            };
+            let fixed = redeclare_utf8(&text);
+            if fixed != text {
+                book.set_text(name, fixed);
+            }
+        }
+
+        Outcome::change(format!(
+            "re-encoded {} entr(ies) from UTF-16 to UTF-8 [{}]",
+            names.len(),
+            names
+                .iter()
+                .map(|n| crate::util::basename(n).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+/// Rewrite whatever the file says about its own encoding.
+///
+/// Two places say it, and both have to move or the file contradicts its bytes:
+/// the XML declaration's `encoding=`, and a CSS `@charset`. A declaration that
+/// is absent is correct already — UTF-8 is the default in both formats.
+fn redeclare_utf8(text: &str) -> String {
+    static XML_ENC: LazyLock<Regex> =
+        LazyLock::new(|| re(r#"(<\?xml\b[^>]*?encoding=")([^"]*)(")"#));
+    static CHARSET: LazyLock<Regex> = LazyLock::new(|| re(r#"(@charset\s+")([^"]*)(")"#));
+
+    let once = XML_ENC.replacen(text, 1, "${1}utf-8${3}");
+    CHARSET.replacen(&once, 1, "${1}utf-8${3}").into_owned()
 }

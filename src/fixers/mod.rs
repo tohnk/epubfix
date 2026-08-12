@@ -116,10 +116,13 @@ pub trait Fixer {
 /// hrefs against names no longer in the archive.
 pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
     vec![
+        Box::new(opf::Encoding),
         Box::new(opf::MimetypeEntry),
+        Box::new(opf::ContainerRootfile),
         Box::new(opf::PackageVersion),
         Box::new(opf::SpinePageMap),
-        Box::new(opf::FontMediaType),
+        Box::new(opf::MediaTypes),
+        Box::new(opf::ManifestItems),
         Box::new(opf::EmptyMetadata),
         Box::new(opf::DcLanguage {
             policy: opts.language,
@@ -152,6 +155,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         }),
         Box::new(css_paths::CssPaths),
         Box::new(resources::BrokenFragments),
+        Box::new(resources::ReferenceFragments),
         Box::new(resources::DeadSchemes),
         // Before the renumbering, which closes the gaps removal leaves behind.
         Box::new(ncx::DeadNavEntries),
