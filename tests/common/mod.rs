@@ -68,7 +68,7 @@ pub fn roundtrip_full(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>
     let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
     let mut outcome = epubfix::retag_book(&mut book);
     outcome.merge(epubfix::fix_book(&mut book));
-    outcome.merge(epubfix::finish_book(&mut book));
+    outcome.merge(epubfix::finish_book(&mut book, true));
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
     (outcome, read_epub(&out.into_inner()))
@@ -245,7 +245,7 @@ pub fn roundtrip_with(
         &mut book,
         &epubfix::fixers::all(opts),
     ));
-    outcome.merge(epubfix::finish_book(&mut book));
+    outcome.merge(epubfix::finish_book(&mut book, true));
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
     (outcome, read_epub(&out.into_inner()))
@@ -338,7 +338,7 @@ pub fn roundtrip_kept(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>
     let mut book = Book::load(Cursor::new(bytes.to_vec())).unwrap();
     let mut outcome = epubfix::conform_book(&mut book);
     outcome.merge(epubfix::fix_book(&mut book));
-    outcome.merge(epubfix::finish_book(&mut book));
+    outcome.merge(epubfix::finish_book(&mut book, true));
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
     (outcome, read_epub(&out.into_inner()))
@@ -350,7 +350,7 @@ pub fn roundtrip_migrated(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u
     let mut outcome = epubfix::migrate_book(&mut book);
     outcome.merge(epubfix::conform_book(&mut book));
     outcome.merge(epubfix::fix_book(&mut book));
-    outcome.merge(epubfix::finish_book(&mut book));
+    outcome.merge(epubfix::finish_book(&mut book, true));
     let mut out = Cursor::new(Vec::new());
     book.save(&mut out).unwrap();
     (outcome, read_epub(&out.into_inner()))

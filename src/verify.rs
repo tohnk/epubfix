@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::book::Book;
-use crate::markup::{NodeKind, id_attrs, scan};
+use crate::markup::{NodeKind, id_attrs, scan, well_formed};
 use crate::refs::resolve_href;
 use crate::util::{MARKUP, ends_with_any};
 
@@ -96,6 +96,14 @@ fn is_linky(name: &str) -> bool {
     ends_with_any(name, &[".xhtml", ".html", ".htm", ".ncx", ".opf"])
 }
 
+/// Files an EPUB requires to be well-formed XML. CSS is textual but not XML.
+fn is_xml(name: &str) -> bool {
+    ends_with_any(
+        name,
+        &[".xhtml", ".html", ".htm", ".ncx", ".opf", ".svg", ".xml"],
+    )
+}
+
 /// Every defect a book has on its own terms, as comparable strings.
 ///
 /// Deliberately *not* an assertion of correctness — plenty of real books are
@@ -114,7 +122,43 @@ pub fn remaining(book: &Book) -> Vec<String> {
 
 fn defects(book: &Book) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    let present: HashSet<&str> = book.names().iter().map(String::as_str).collect();
+
+    // Renames are pending until the archive is repacked, so `names()` still
+    // reports what the book was called on the way in while its markup already
+    // says what it will be called on the way out. Checking one against the
+    // other reports every renamed file as missing — which is how this was
+    // found, on a fixture whose cover image the filenames fixer had just
+    // correctly renamed. So the scan asks what the book is about to become.
+    let renamed = book.renames();
+    let finally = |name: &str| renamed.get(name).map_or(name, String::as_str).to_string();
+    let present: HashSet<String> = book.names().iter().map(|n| finally(n)).collect();
+    let original: HashMap<String, String> = book
+        .names()
+        .iter()
+        .map(|n| (finally(n), n.clone()))
+        .collect();
+
+    // A document that will not parse is the most serious thing there is — EPUB
+    // Check calls it fatal and stops reading the file — and it is the one thing
+    // every fixer is guaranteed to miss, because they all skip what they cannot
+    // scan. The parser already knows exactly what is wrong; the only mistake
+    // was throwing that away.
+    for name in book.names() {
+        if !is_xml(name) {
+            continue;
+        }
+        let Some(text) = book.text(name) else {
+            continue;
+        };
+        if let Err(e) = well_formed(text) {
+            let line = text[..e.position.min(text.len())].lines().count();
+            found.insert(format!(
+                "{name}: not well-formed XML at line {line} ({}) — nothing can read this \
+                 document, and no fixer can touch it",
+                e.message
+            ));
+        }
+    }
 
     for name in book.markup_names() {
         let Some(text) = book.text(&name) else {
@@ -136,28 +180,33 @@ fn defects(book: &Book) -> BTreeSet<String> {
         }
         let Some(src) = book.text(name) else { continue };
         let Ok(nodes) = scan(src) else { continue };
+        // The document's own path may have moved too, so its relative links
+        // have to be read from where it is going to live.
+        let here = finally(name);
         for attr in nodes
             .iter()
             .flat_map(|n| n.attrs.iter())
             .filter(|a| a.name.ends_with("href") || a.name == "src")
         {
-            let Some((target, fragment)) = resolve_href(name, &attr.value) else {
+            let Some((target, fragment)) = resolve_href(&here, &attr.value) else {
                 continue;
             };
-            if !present.contains(target.as_str()) {
-                found.insert(format!("{name}: link to missing file \"{target}\""));
+            if !present.contains(&target) {
+                found.insert(format!("{here}: link to missing file \"{target}\""));
                 continue;
             }
             let (Some(fragment), true) = (fragment, ends_with_any(&target, MARKUP)) else {
                 continue;
             };
             let set = id_cache.entry(target.clone()).or_insert_with(|| {
-                book.text(&target)
+                original
+                    .get(&target)
+                    .and_then(|o| book.text(o))
                     .map_or_else(HashSet::new, |t| ids(t).into_iter().collect())
             });
             if !set.contains(&fragment) {
                 found.insert(format!(
-                    "{name}: link to \"{target}#{fragment}\" but no such id exists"
+                    "{here}: link to \"{target}#{fragment}\" but no such id exists"
                 ));
             }
         }

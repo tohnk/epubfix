@@ -110,19 +110,32 @@ pub fn fix_book(book: &mut Book) -> Outcome {
     fix_book_with(book, &fixers::all(&Options::default()))
 }
 
-/// The last phase of a run: declarations derived from what the documents
-/// finally contain.
+/// The last phase of a run: everything that can only be decided once every
+/// repair has landed.
 ///
-/// Separate from the fixer registry because it is not a repair — it is
-/// bookkeeping that only makes sense once every repair has landed. Manifest
-/// properties are the case in point: several fixers can remove the very
-/// construct that earned one, and computing them any earlier means declaring a
-/// property the finished book does not need.
+/// Two things live here. **Derived declarations** — the manifest properties —
+/// because several fixers can remove the very construct that earned one, so
+/// computing them earlier means declaring a property the finished book does
+/// not need. And **the closing scan**, which records what is still visibly
+/// wrong, because "epubfix changed some bytes" and "this book is in good
+/// order" are different claims and only the first is ours to make.
 ///
-/// Anything running the pipeline by hand needs to call this too, after
-/// [`fix_book`]; `fix_file` does it for you.
-pub fn finish_book(book: &mut Book) -> Outcome {
-    migrate::finalise_properties(book)
+/// `derive_declarations` is false for an `--only` run, where writing something
+/// the user did not ask for would be wrong. The scan runs either way: it
+/// reports, it does not change anything.
+///
+/// Anything driving the pipeline by hand must call this after [`fix_book`];
+/// `fix_file` does it for you. Both times a phase has been added here, the
+/// test helpers silently skipped it by calling `fix_book` directly — which is
+/// exactly what a library caller would have done.
+pub fn finish_book(book: &mut Book, derive_declarations: bool) -> Outcome {
+    let mut outcome = if derive_declarations {
+        migrate::finalise_properties(book)
+    } else {
+        Outcome::none()
+    };
+    outcome.remaining = verify::remaining(book);
+    outcome
 }
 
 /// Convert `book` to EPUB 3, but only if the result preserves everything.
@@ -255,13 +268,7 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
         outcome.merge(retag_book(&mut book));
     }
     outcome.merge(fix_book_with(&mut book, &selected));
-    if opts.only.is_empty() {
-        outcome.merge(finish_book(&mut book));
-    }
-    // What is still wrong with the book as it now stands. Reported rather than
-    // counted, because "epubfix changed some bytes" and "this book is in good
-    // order" are different claims and only the first one is ours to make.
-    outcome.remaining = verify::remaining(&book);
+    outcome.merge(finish_book(&mut book, opts.only.is_empty()));
     if !outcome.has_changes() || opts.dry_run {
         return Ok(outcome);
     }

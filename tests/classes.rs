@@ -1219,3 +1219,88 @@ fn the_prefix_the_package_actually_binds_is_the_one_written() {
         opf_of(&after)
     );
 }
+
+// ---------------------------------------------------------------------------
+// The final scan
+// ---------------------------------------------------------------------------
+
+/// A document that will not parse is fatal to EPUB Check and invisible to every
+/// fixer, since they all skip what they cannot scan. It is exactly the case
+/// where reporting "nothing to do" is worst, so the run says so instead.
+#[test]
+fn a_document_that_will_not_parse_is_reported() {
+    let opf = opf("2.0", "", "", "");
+    let broken = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+        <html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>T</title></head>\
+        <body><p>Tom <b>and Jerry</p></body></html>";
+    let (outcome, _) = roundtrip_full(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", broken.as_bytes()),
+    ]));
+
+    assert!(
+        outcome
+            .remaining
+            .iter()
+            .any(|r| r.contains("not well-formed XML") && r.contains("ch1.xhtml")),
+        "got {:?}",
+        outcome.remaining
+    );
+}
+
+/// The lenient scanner is what lets fixers work on sloppy files, so it must not
+/// be the thing asked about well-formedness — a distinction that hid this whole
+/// class of defect until the two were separated.
+#[test]
+fn the_lenient_scanner_and_the_strict_check_disagree_on_purpose() {
+    let sloppy = "<html><body><p>Tom <b>and Jerry</p></body></html>";
+    assert!(
+        epubfix::markup::scan(sloppy).is_ok(),
+        "the editor must still be able to work here"
+    );
+    assert!(
+        epubfix::markup::well_formed(sloppy).is_err(),
+        "but the report must not call it fine"
+    );
+}
+
+#[test]
+fn a_well_formed_book_draws_no_parse_complaint() {
+    let (outcome, _) = fix(&book2("<p>text</p>"));
+    assert!(outcome.remaining.is_empty(), "got {:?}", outcome.remaining);
+}
+
+/// Renames are pending until the archive is repacked, so the book still knows
+/// its files by their old names while the markup already points at the new
+/// ones. Checking one against the other reports every renamed file as missing.
+#[test]
+fn a_renamed_file_is_not_reported_missing_by_the_closing_scan() {
+    let opf = opf(
+        "2.0",
+        r#"    <item id="img" href="img/cover image.gif" media-type="image/gif"/>"#,
+        "",
+        "",
+    );
+    let ch1 = doc(r#"<p><img src="img/cover image.gif" alt=""/></p>"#);
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/img/cover image.gif", b"GIF89a"),
+    ]));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("renamed 1")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(has(&after, "OEBPS/img/cover_image.gif"));
+    assert!(
+        outcome.remaining.is_empty(),
+        "the rename is the repair, not a defect: {:?}",
+        outcome.remaining
+    );
+}

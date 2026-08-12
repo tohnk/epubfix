@@ -549,12 +549,23 @@ and on a book with defects no fixer covers that reads as *this book is now in
 good order* — a claim epubfix is in no position to make. It changed some bytes;
 whether the result validates is a different question and belongs to EPUB Check.
 
-The check reuses the differential gate's defect model, which covers duplicate
-ids, links to files that are not there, and fragments that resolve to nothing.
-That is a small fraction of what EPUB Check looks at, so **silence here is not
-validity** — which is why the caveat prints alongside the counts rather than
-being left for the reader to infer. Exit status 3 covers this as well as
-findings, so a library sweep can be scripted on it.
+The check reuses the differential gate's defect model — duplicate ids, links to
+files that are not there, fragments that resolve to nothing — plus one thing
+that belongs nowhere else: **whether each document is well-formed XML at all**.
+
+That last one is worth its own note, because it is the case where saying
+"nothing to do" is worst and where the tool was silent. Every fixer opens a
+document with the lenient scanner and skips what it cannot read, so a chapter
+with an unclosed `<b>` slid past all of them — while EPUB Check calls it fatal
+and stops reading the file. The scanner's leniency is right: it exists to *edit*
+real books, and refusing to open a sloppy file means refusing to help the books
+that need it most. But leniency in the editor must not become silence in the
+report, so the closing scan asks a second, strict parser instead.
+
+All of that together is still a small fraction of what EPUB Check looks at, so
+**silence here is not validity** — which is why the caveat prints alongside the
+counts rather than being left for the reader to infer. Exit status 3 covers this
+as well as findings, so a library sweep can be scripted on it.
 
 A residual whose subject a finding already named is not printed twice:
 `dangling-resources` declining to delete an `<img>` and the final scan seeing

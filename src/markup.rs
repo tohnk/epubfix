@@ -131,10 +131,13 @@ impl std::error::Error for ScanError {}
 
 /// Walk `src`, returning every tag in document order.
 ///
-/// The reader is configured permissively: this tool repairs books, so a
-/// mismatched end tag or a bare `&` should not stop it from doing the work it
-/// can. Genuinely malformed markup still errors, and the caller reports that
-/// rather than guessing.
+/// The reader is configured permissively, and that is a deliberate trade this
+/// tool makes twice over: it repairs real books, so a mismatched end tag or a
+/// bare `&` must not stop it from doing the work it *can* do on the rest of the
+/// document. The cost is that success here says nothing about whether the
+/// document is well-formed — an unclosed `<b>` sails straight through. Anything
+/// that wants to report on the document rather than edit it must ask
+/// [`well_formed`], which turns the checks back on.
 pub fn scan(src: &str) -> Result<Vec<Node>, ScanError> {
     let mut reader = Reader::from_str(src);
     let cfg = reader.config_mut();
@@ -235,6 +238,40 @@ pub fn scan(src: &str) -> Result<Vec<Node>, ScanError> {
     }
 
     Ok(nodes)
+}
+
+/// Is this document well-formed XML?
+///
+/// Deliberately separate from [`scan`], which is tolerant on purpose: it exists
+/// to *edit* real books, and refusing to open a file because somebody left a
+/// `<b>` unclosed would mean refusing to help exactly the books that need it.
+/// Being lenient there is right, but it means `scan` succeeding says nothing
+/// about well-formedness — so anything that wants to *report* on the document
+/// has to ask separately, with the checks turned on.
+///
+/// An EPUB content document is required to be XML, and one that is not is
+/// fatal: EPUB Check stops reading the file. Nothing else in this crate will
+/// notice, because every fixer skips what it cannot scan.
+pub fn well_formed(src: &str) -> Result<(), ScanError> {
+    let mut reader = Reader::from_str(src);
+    let cfg = reader.config_mut();
+    cfg.check_end_names = true;
+    cfg.allow_unmatched_ends = false;
+    cfg.allow_dangling_amp = false;
+    cfg.expand_empty_elements = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => {
+                return Err(ScanError {
+                    position: pos(&reader),
+                    message: e.to_string(),
+                });
+            }
+        }
+    }
 }
 
 /// Pull the element name and attribute spans out of one raw tag.
