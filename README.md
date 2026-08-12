@@ -530,6 +530,31 @@ against the book and finding it had nothing to say — which is the rule's
 corollary: **verify by re-running epubcheck, not by reasoning about the fix.**
 The error count must strictly decrease and no new error *code* may appear.
 
+### The fixture suite, and one deliberate disagreement
+
+`epubfix-fixtures/run_suite.py` diffs EPUBCheck before and after across eight
+hand-built books. Current result: **7 of 8**, and the eighth is a disagreement
+about policy rather than a defect.
+
+| Fixture | | |
+| --- | --- | --- |
+| `clean-epub2`, `clean-epub3` | 0 → 0 | byte-identical |
+| `epub2-defects` | 32 → 1 | the survivor is the non-decorative `<img>` with no `alt`, report-only by design |
+| `epub3-defects` | 17 → 0 | |
+| `oebps10-declaration` | 1 → 0 | |
+| `missing-language` | 1 → 0 | `en`, 9 of 11 samples, the two Latin footnote files outvoted |
+| `missing-language-derivable` | 1 → 0 | from `xml:lang`, detection never reached |
+| `epub2-mistagged` | 122 → 0 | **suite says FAIL** |
+
+The suite expects `epub2-mistagged` to be left alone and merely reported, on the
+spec's original rule that changing a book's declared version is opt-in. This
+tool retags by default instead, because the declaration is one attribute and the
+content is thousands of elements — that policy is stated at the top of *Version
+retagging* and it is a deliberate override. The book validates clean afterwards.
+
+`--keep-version` restores exactly what the fixture asks for: the book comes out
+byte-identical, with the mismatch reported rather than repaired.
+
 Verified end to end against EPUB Check 5.2.1. Fixture books carrying every
 defect above validate with zero errors afterwards, as **both** EPUB 2 (9 errors
 to 0) and EPUB 3 (20 errors to 0); a Coleridge-shaped EPUB 2 book with verse in

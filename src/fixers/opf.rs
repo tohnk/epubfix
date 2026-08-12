@@ -262,12 +262,24 @@ impl Fixer for DcLanguage {
         // assuming `dc:` — it is a namespace binding, not a fixed spelling.
         let prefix = dc_prefix(&opf).unwrap_or_else(|| "dc".to_string());
 
-        let indent = line_indent(&opf, nodes[close].span.start);
+        // Line up with the other children of <metadata> rather than with the
+        // closing tag, and insert at the start of its line so the indentation
+        // already sitting there is not counted twice.
+        let close_at = nodes[close].span.start;
+        let line_start = opf[..close_at].rfind('\n').map_or(0, |i| i + 1);
+        let indent = nodes
+            .iter()
+            .rfind(|n| n.parent == Some(metadata) && n.kind != NodeKind::End)
+            .map_or_else(
+                || format!("{}  ", line_indent(&opf, close_at)),
+                |last| line_indent(&opf, last.span.start),
+            );
+
         let mut edits = Edits::new();
         edits.insert(
-            nodes[close].span.start,
+            line_start,
             format!(
-                "{indent}  <{prefix}:language>{}</{prefix}:language>\n{indent}",
+                "{indent}<{prefix}:language>{}</{prefix}:language>\n",
                 found.language
             ),
         );

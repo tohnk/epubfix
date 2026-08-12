@@ -127,6 +127,11 @@ impl Fixer for VersionMismatch {
         if book.epub_version() >= 3 {
             return outcome;
         }
+        // This runs last, so a mismatch still standing here is one that nothing
+        // acted on: either the evidence was too weak to retag on, or retagging
+        // was suppressed or refused. A book that *was* retagged now declares
+        // EPUB 3 and returns above, which is what keeps this quiet on the
+        // ordinary path.
         let assessment = crate::version::assess(book);
         if assessment.suggestive_only() {
             outcome.push_finding(format!(
@@ -135,6 +140,14 @@ impl Fixer for VersionMismatch {
                  retag the whole book on, so nothing was changed; wrap them in a <div> by \
                  hand, or use --migrate-epub3 to change the declaration instead.",
                 assessment.inline_in_block
+            ));
+        } else if !assessment.epub3_only.is_empty() {
+            outcome.push_finding(format!(
+                "declares EPUB 2, but the content requires EPUB 3 ({}). The declaration was \
+                 left as it is — run without --keep-version to have it corrected, since \
+                 rewriting the markup to suit the declaration would be the larger change by \
+                 far.",
+                assessment.epub3_only.join("; ")
             ));
         }
         outcome
