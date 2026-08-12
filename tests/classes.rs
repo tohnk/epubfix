@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::fmt::Write as _;
+
 use common::verify::verify;
 use common::{entry, has, make_epub, read_epub, roundtrip_full, roundtrip_kept};
 
@@ -978,4 +980,242 @@ fn an_ordinary_dead_link_is_fixed_without_a_report() {
         r#"<p><a href="kindle:pos:fid:0001">Genesis</a></p>"#,
     ));
     assert!(outcome.findings.is_empty(), "got {:?}", outcome.findings);
+}
+
+// ---------------------------------------------------------------------------
+// dc-language
+// ---------------------------------------------------------------------------
+
+const EN: &str = "It was a bright cold day in April, and the clocks were striking \
+    thirteen. Winston Smith, his chin nuzzled into his breast in an effort to escape \
+    the vile wind, slipped quickly through the glass doors of Victory Mansions, though \
+    not quickly enough to prevent a swirl of gritty dust from entering along with him. ";
+const LA: &str = "Gallia est omnis divisa in partes tres, quarum unam incolunt Belgae, \
+    aliam Aquitani, tertiam qui ipsorum lingua Celtae, nostra Galli appellantur. Hi \
+    omnes lingua, institutis, legibus inter se differunt. Gallos ab Aquitanis Garumna \
+    flumen, a Belgis Matrona et Sequana dividit. ";
+
+/// A book with no `dc:language`, and the given documents.
+fn language_book(docs: &[(String, String)], lang_attr: &str) -> Vec<u8> {
+    let mut items = String::new();
+    let mut spine = String::new();
+    for (i, (f, _)) in docs.iter().enumerate() {
+        let _ = writeln!(
+            items,
+            "    <item id=\"d{i}\" href=\"{f}\" media-type=\"application/xhtml+xml\"/>"
+        );
+        let _ = write!(spine, "<itemref idref=\"d{i}\"/>");
+    }
+    let opf = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
+    <dc:title>Test</dc:title>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+{items}  </manifest>
+  <spine toc="ncx">{spine}</spine>
+</package>"#
+    );
+    let pages: Vec<(String, String)> = docs
+        .iter()
+        .map(|(f, text)| {
+            (
+                format!("OEBPS/{f}"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+                     <html xmlns=\"http://www.w3.org/1999/xhtml\"{lang_attr}>\
+                     <head><title>T</title></head><body><p>{text}</p></body></html>"
+                ),
+            )
+        })
+        .collect();
+    let mut files: Vec<(&str, &[u8])> = vec![
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+    ];
+    files.extend(pages.iter().map(|(n, t)| (n.as_str(), t.as_bytes())));
+    make_epub(&files)
+}
+
+fn chapters(prefix: &str, text: &str, n: usize) -> Vec<(String, String)> {
+    (0..n)
+        .map(|i| (format!("{prefix}{i}.xhtml"), text.repeat(3)))
+        .collect()
+}
+
+fn opf_of(after: &[(String, Vec<u8>)]) -> String {
+    entry(after, "OEBPS/content.opf")
+}
+
+/// What the documents declare is a stated fact, not an inference, so it is
+/// used whatever the detection policy says — and only the primary subtag is
+/// written, since nothing can tell `en-GB` from `en-US`.
+#[test]
+fn a_declared_xml_lang_is_used_and_reduced_to_its_primary_subtag() {
+    let docs = chapters("ch", EN, 6);
+    for policy in [
+        epubfix::LanguagePolicy::EnglishOnly,
+        epubfix::LanguagePolicy::Off,
+    ] {
+        let opts = epubfix::Options {
+            language: policy,
+            ..epubfix::Options::default()
+        };
+        let (outcome, after) =
+            common::roundtrip_with(&language_book(&docs, r#" xml:lang="en-GB""#), &opts);
+        assert!(
+            outcome
+                .changes
+                .iter()
+                .any(|c| c.contains("<dc:language>en</dc:language>") && c.contains("declare")),
+            "got {:?} for {policy:?}",
+            outcome.changes
+        );
+        assert!(opf_of(&after).contains("<dc:language>en</dc:language>"));
+    }
+}
+
+/// The Aristotle shape: thirteen English chapters and two Latin footnote files.
+/// One unlucky sample declares the book Latin, with confidence.
+#[test]
+fn latin_footnote_files_cannot_outvote_the_book() {
+    let mut docs = vec![(
+        "copyright.xhtml".to_string(),
+        "Copyright 2011. All rights reserved. ISBN 978-0-00-000000-0.".to_string(),
+    )];
+    docs.extend(chapters("ch", EN, 13));
+    docs.extend(chapters("notes", LA, 2));
+
+    let (outcome, after) = roundtrip_full(&language_book(&docs, ""));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("detected")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        opf_of(&after).contains("<dc:language>en</dc:language>"),
+        "{}",
+        opf_of(&after)
+    );
+}
+
+/// A Calibre-fragmented book: sixty documents of 280 characters each. A fixed
+/// "take fifteen documents" yields almost nothing classifiable, so short
+/// documents are glued together rather than discarded.
+#[test]
+fn documents_below_the_floor_are_glued_rather_than_discarded() {
+    let docs: Vec<(String, String)> = (0..60)
+        .map(|i| (format!("f{i:03}.xhtml"), EN[..280].to_string()))
+        .collect();
+    let (_, after) = roundtrip_full(&language_book(&docs, ""));
+    assert!(
+        opf_of(&after).contains("<dc:language>en</dc:language>"),
+        "{}",
+        opf_of(&after)
+    );
+}
+
+/// The default policy writes only English — not because detection is worse in
+/// other languages, but because the worst case becomes "did nothing" instead of
+/// "confidently wrong".
+#[test]
+fn a_book_that_is_not_english_is_reported_by_default_and_written_on_request() {
+    let fr = "Longtemps, je me suis couché de bonne heure. Parfois, à peine ma bougie \
+        éteinte, mes yeux se fermaient si vite que je n'avais pas le temps de me dire: \
+        Je m'endors. Et, une demi-heure après, la pensée qu'il était temps de chercher \
+        le sommeil m'éveillait. ";
+    let docs = chapters("ch", fr, 6);
+
+    let (outcome, after) = roundtrip_full(&language_book(&docs, ""));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert!(!opf_of(&after).contains("dc:language"));
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("\"fr\"") && f.contains("--language-detect=any")),
+        "the report must name what it saw: {:?}",
+        outcome.findings
+    );
+
+    let opts = epubfix::Options {
+        language: epubfix::LanguagePolicy::Any,
+        ..epubfix::Options::default()
+    };
+    let (_, after) = common::roundtrip_with(&language_book(&docs, ""), &opts);
+    assert!(opf_of(&after).contains("<dc:language>fr</dc:language>"));
+}
+
+/// Never a locale, never a default. A book with nothing to go on is reported.
+#[test]
+fn a_book_with_nothing_to_go_on_is_never_guessed_at() {
+    let docs = vec![
+        ("a.xhtml".to_string(), "Short.".to_string()),
+        ("b.xhtml".to_string(), "Also short.".to_string()),
+    ];
+    let (outcome, after) = roundtrip_full(&language_book(&docs, ""));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("dc:language")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!opf_of(&after).contains("dc:language"));
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("neither the documents nor the text")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+#[test]
+fn a_book_that_already_declares_a_language_is_untouched() {
+    let (outcome, _) = fix(&book2("<p>text</p>"));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("dc:language")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// The Dublin Core prefix is a namespace binding, not a fixed spelling.
+#[test]
+fn the_prefix_the_package_actually_binds_is_the_one_written() {
+    let docs = chapters("ch", EN, 6);
+    let book = language_book(&docs, "");
+    let rebound = {
+        let files = read_epub(&book);
+        let opf = entry(&files, "OEBPS/content.opf")
+            .replace("xmlns:dc=", "xmlns:dcterms=")
+            .replace("<dc:", "<dcterms:")
+            .replace("</dc:", "</dcterms:");
+        let owned: Vec<(String, Vec<u8>)> = files
+            .into_iter()
+            .map(|(n, d)| {
+                if n == "OEBPS/content.opf" {
+                    (n, opf.clone().into_bytes())
+                } else {
+                    (n, d)
+                }
+            })
+            .collect();
+        make_epub(
+            &owned
+                .iter()
+                .map(|(n, d)| (n.as_str(), d.as_slice()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (_, after) = roundtrip_full(&rebound);
+    assert!(
+        opf_of(&after).contains("<dcterms:language>en</dcterms:language>"),
+        "{}",
+        opf_of(&after)
+    );
 }

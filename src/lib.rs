@@ -10,6 +10,7 @@ pub mod book;
 pub mod css;
 pub mod entities;
 pub mod fixers;
+pub mod language;
 pub mod markup;
 pub mod migrate;
 pub mod paths;
@@ -26,6 +27,7 @@ use std::path::{Path, PathBuf};
 pub use book::Book;
 pub use fixers::tables::Presentation;
 pub use fixers::{Fixer, Outcome};
+pub use language::Policy as LanguagePolicy;
 
 #[derive(Debug)]
 pub enum Error {
@@ -85,6 +87,8 @@ pub struct Options {
     pub keep_version: bool,
     /// What to do with presentational attributes the ruleset rejects.
     pub presentation: Presentation,
+    /// When the tool may write a language it worked out for itself.
+    pub language: LanguagePolicy,
 }
 
 impl Default for Options {
@@ -96,6 +100,7 @@ impl Default for Options {
             migrate_epub3: false,
             keep_version: false,
             presentation: Presentation::Strip,
+            language: LanguagePolicy::EnglishOnly,
         }
     }
 }

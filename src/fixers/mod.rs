@@ -109,6 +109,9 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(opf::PackageVersion),
         Box::new(opf::SpinePageMap),
         Box::new(opf::FontMediaType),
+        Box::new(opf::DcLanguage {
+            policy: opts.language,
+        }),
         Box::new(attrs::XhtmlNamespace),
         Box::new(ids::XmlIds),
         // After xml-ids, so a sanitised id that collided with an existing one

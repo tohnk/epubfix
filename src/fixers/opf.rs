@@ -6,7 +6,8 @@ use regex::Regex;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::markup::{Edits, scan};
+use crate::language::{self, Policy};
+use crate::markup::{Edits, NodeKind, scan};
 use crate::refs::resolve_href;
 use crate::util::{ends_with_any, re};
 
@@ -169,4 +170,136 @@ impl Fixer for GuideReferences {
             "removed {dropped} guide reference(s) pointing at a non-content file"
         ))
     }
+}
+
+/// RSC-005: `element "metadata" incomplete; missing required element
+/// "dc:language"`.
+///
+/// Required by both EPUB versions, and position inside `<metadata>` does not
+/// matter — measured, inserted first and last, both clean. What epubcheck does
+/// *not* do is check the value: `<dc:language>zz</dc:language>` validates
+/// without a murmur. So this is a field where being wrong is silent, and it is
+/// worth being careful about, since reading systems hyphenate and choose
+/// speech voices from it.
+///
+/// See [`crate::language`] for how the value is arrived at. The short version:
+/// what the documents already declare, else what the text says, else nothing.
+/// Never the system locale, which is what Calibre does and is how an English
+/// machine turns a Hungarian novel into `<dc:language>en</dc:language>`.
+pub struct DcLanguage {
+    pub policy: Policy,
+}
+
+impl Default for DcLanguage {
+    fn default() -> Self {
+        DcLanguage {
+            policy: Policy::EnglishOnly,
+        }
+    }
+}
+
+impl Fixer for DcLanguage {
+    fn name(&self) -> &'static str {
+        "dc-language"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "add the required <dc:language>, taken from the documents or from the text"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(opf) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&opf) else {
+            return Outcome::none();
+        };
+
+        // Only an absent element is an error. One that is present but odd is
+        // the author's business, and epubcheck does not mind either way.
+        if nodes
+            .iter()
+            .any(|n| n.name == "language" && n.kind != NodeKind::End)
+        {
+            return Outcome::none();
+        }
+        let Some(metadata) = nodes
+            .iter()
+            .position(|n| n.name == "metadata" && n.kind == NodeKind::Start)
+        else {
+            return Outcome::none();
+        };
+        let Some(close) = nodes[metadata].close else {
+            return Outcome::none();
+        };
+
+        let Some(found) = language::detect(book, self.policy) else {
+            let mut outcome = Outcome::finding(match language::observed(book) {
+                Some(seen) => format!(
+                    "no <dc:language>, and the text reads as \"{}\" rather than English, so \
+                     nothing was written — set it by hand, or re-run with \
+                     --language-detect=any",
+                    seen.language
+                ),
+                None => "no <dc:language>, and neither the documents nor the text say what \
+                         language the book is in; it needs setting by hand"
+                    .to_string(),
+            });
+            outcome.push_finding(
+                "a wrong <dc:language> is worse than a missing one: reading systems hyphenate \
+                 and choose speech voices from it"
+                    .to_string(),
+            );
+            return outcome;
+        };
+
+        // Match the prefix the file already uses for Dublin Core rather than
+        // assuming `dc:` — it is a namespace binding, not a fixed spelling.
+        let prefix = dc_prefix(&opf).unwrap_or_else(|| "dc".to_string());
+
+        let indent = line_indent(&opf, nodes[close].span.start);
+        let mut edits = Edits::new();
+        edits.insert(
+            nodes[close].span.start,
+            format!(
+                "{indent}  <{prefix}:language>{}</{prefix}:language>\n{indent}",
+                found.language
+            ),
+        );
+        book.set_text(&opf_name, edits.apply(&opf));
+
+        let how = match found.source {
+            language::Source::Declared => "which is what the content documents declare".to_string(),
+            language::Source::Detected { samples, share } => {
+                format!("detected from the text ({share} of {samples} samples)")
+            }
+        };
+        Outcome::change(format!(
+            "added <dc:language>{}</dc:language> — {how}",
+            found.language
+        ))
+    }
+}
+
+/// The prefix this package document binds Dublin Core to.
+fn dc_prefix(opf: &str) -> Option<String> {
+    let at = opf.find("=\"http://purl.org/dc/elements/1.1/\"")?;
+    let decl = &opf[..at];
+    let name = decl.rsplit(|c: char| c.is_whitespace()).next()?;
+    name.strip_prefix("xmlns:").map(str::to_string)
+}
+
+/// The whitespace opening the line that byte `at` sits on, so an inserted
+/// element lines up with its neighbours.
+fn line_indent(text: &str, at: usize) -> String {
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    text[start..at]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect()
 }

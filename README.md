@@ -32,6 +32,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `opf-version` | OPF-001 | `<package version="1.0">` (OEBPS 1.0) → `"2.0"` |
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
 | `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
+| `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
 | `content-duplicate-ids` | RSC-005 | makes duplicated ids in a content document unique, keeping the first and leaving referenced ones alone |
@@ -142,6 +143,43 @@ When nothing resolves, what gets deleted is whatever unit has become
 meaningless — the whole `@font-face` (a face with no source is nothing), the
 `@import` statement, or just the one declaration. Never an `<img>` or an `<a>`:
 those carry content, and their absence is a defect to report.
+
+### Working out a book's language
+
+`dc:language` is required by both versions, and epubcheck accepts whatever it
+finds there — `<dc:language>zz</dc:language>` validates clean. So this is a
+field where being wrong is *silent*, and being wrong costs something: reading
+systems pick hyphenation dictionaries, speech voices and sometimes fonts off it.
+An absent value falls back to something sensible; a wrong one mis-hyphenates
+every page.
+
+Which rules out the obvious shortcut. Calibre writes a default from the
+**system locale** without reading the book, so a Hungarian novel that passes
+through Calibre on an English machine comes out declaring `en`. That is a guess
+wearing the costume of metadata.
+
+1. **What the documents already say.** `xml:lang` or `lang` on `<html>` is a
+   stated fact in the file — the same class of evidence as the NCX identifier
+   that gets synced to the OPF. Used whatever the detection policy says, and
+   reduced to its primary subtag, since nothing can tell `en-GB` from `en-US`.
+2. **Detection from the text**, only if the first step found nothing.
+3. **A report.** Never a locale, never a default.
+
+Every sampling rule comes from a book that broke a simpler version. *The
+Complete Works of Aristotle* votes thirteen English to two Latin — the two are
+footnote files of nothing but Latin citations, so one unlucky sample declares
+the book Latin with confidence. *A Supposedly Fun Thing I'll Never Do Again* has
+323 documents with a **median length of 281 characters**, because Calibre split
+it into fragments, so a fixed "take fifteen documents" yields two usable
+samples. Hence: skip the front matter, glue short documents together rather than
+discarding them, require at least three samples, and require more than half.
+
+`--language-detect` decides when a *detected* language may be written.
+`en-only` is the default, and not because detection is worse in other languages
+— it isn't. It is about the shape of the failure: restricted to English the
+worst case is "did nothing, the error remains", unrestricted it is a book
+confidently labelled wrong, which nobody ever notices. `any` writes whatever the
+text says; `off` uses only what the documents declare.
 
 ### Repairing a dead link, not just silencing it
 
@@ -313,6 +351,9 @@ epubfix [OPTIONS] [FILE_OR_DIR ...]
     --preserve-presentation
                     convert legacy table attributes to inline CSS
                     instead of removing them
+    --language-detect=MODE
+                    when a missing <dc:language> may be written from
+                    detected text: en-only (default), any, or off
     --only NAMES    run only these fixers (comma-separated, see --list)
 -l, --list          list the available fixers and exit
     --pause         wait for Enter before exiting

@@ -29,6 +29,9 @@ OPTIONS:
         --preserve-presentation
                         convert legacy table attributes to inline CSS
                         instead of removing them
+        --language-detect=MODE
+                        when a missing <dc:language> may be written from
+                        detected text: en-only (default), any, or off
         --only NAMES    run only these fixers (comma-separated, see --list)
     -l, --list          list the available fixers and exit
         --pause         wait for Enter before exiting
@@ -102,6 +105,19 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
             "--keep-version" => parsed.opts.keep_version = true,
             "--preserve-presentation" => {
                 parsed.opts.presentation = epubfix::Presentation::Preserve;
+            }
+            a if a.starts_with("--language-detect") => {
+                let mode = a.strip_prefix("--language-detect=").unwrap_or("");
+                parsed.opts.language = match mode {
+                    "en-only" => epubfix::LanguagePolicy::EnglishOnly,
+                    "any" => epubfix::LanguagePolicy::Any,
+                    "off" => epubfix::LanguagePolicy::Off,
+                    other => {
+                        return Err(format!(
+                            "--language-detect must be en-only, any or off (got \"{other}\")"
+                        ));
+                    }
+                };
             }
             "--pause" => parsed.pause = Some(true),
             "--no-pause" => parsed.pause = Some(false),
