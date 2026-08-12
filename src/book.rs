@@ -110,11 +110,43 @@ impl Book {
     }
 
     /// Names of the content documents, in archive order.
+    ///
+    /// The extension is a good guess and the manifest is the fact, so both
+    /// count. A Kobo build of *Essays and Aphorisms* ships an empty XHTML
+    /// document called `page-map.xml`, declared `application/xhtml+xml` and
+    /// listed in the spine: epubcheck validates it as a content document and
+    /// reports `element "body" incomplete`, while every fixer here skipped it
+    /// on sight of the extension. Deciding this the way epubcheck decides it is
+    /// the only way the two can agree.
     pub fn markup_names(&self) -> Vec<String> {
+        let declared = self.declared_documents();
         self.order
             .iter()
-            .filter(|n| ends_with_any(n, MARKUP) && self.texts.contains_key(*n))
+            .filter(|n| {
+                self.texts.contains_key(*n)
+                    && (ends_with_any(n, MARKUP) || declared.contains(n.as_str()))
+            })
             .cloned()
+            .collect()
+    }
+
+    /// Archive names the manifest declares to be XHTML content documents.
+    fn declared_documents(&self) -> std::collections::HashSet<String> {
+        static ITEM: LazyLock<Regex> = LazyLock::new(|| crate::util::re(r"<item\b[^>]*>"));
+        let Some(opf) = self.opf_name() else {
+            return std::collections::HashSet::new();
+        };
+        let Some(text) = self.opf_text() else {
+            return std::collections::HashSet::new();
+        };
+        ITEM.find_iter(text)
+            .filter(|m| m.as_str().contains("application/xhtml+xml"))
+            .filter_map(|m| {
+                let tag = m.as_str();
+                let at = tag.find("href=\"")? + 6;
+                let href = &tag[at..at + tag[at..].find('"')?];
+                crate::refs::resolve_href(opf, href).map(|(target, _)| target)
+            })
             .collect()
     }
 

@@ -563,6 +563,8 @@ a schema mentions somewhere.
 | an empty `<dc:*>` is safe to delete | not for the three required ones: absent `<dc:title>` is `metadata incomplete`, a harder error than the empty one |
 | an empty wrapper left by a removed `<img>` is untidy | removing it when it is the body's only child is `element "body" incomplete` |
 | a `<body>` holding only an `<svg>` has no block content | `ns:svg` is in the permitted set epubcheck prints; an SVG cover page is a document, not a fragment |
+| an empty `<body>` has nothing to repair | it is `element "body" incomplete` under EPUB 2 — and clean under EPUB 3, so the container is version-gated |
+| a content document is a file ending `.html`/`.xhtml` | it is whatever the manifest declares `application/xhtml+xml`, whatever it is called |
 
 The first cost five books' worth of pointless entity rewriting, the second 321
 renames in a single book, and the fourth actually *introduced* two OPF-018
@@ -666,6 +668,14 @@ goes from 1 fatal + 11 errors to 0 by being retagged downward.
 *Butcher's Crossing* — the book the path work came from — goes from 3 errors to
 0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
 intact, and the NCX identifier synced.
+
+A Kobo *Essays and Aphorisms* goes from 57 errors to 0, and the last one of
+those took two fixes that are worth stating separately. It ships an empty XHTML
+document called `page-map.xml`, declared `application/xhtml+xml` and listed in
+the spine. Every fixer skipped it on sight of the extension while epubcheck
+validated it as a content document, so `markup_names` now follows the manifest
+as well as the name. And an empty `<body>` was treated as nothing to repair,
+when under EPUB 2 it is `element "body" incomplete`.
 
 *Girl With Curious Hair* goes from 46 errors to 0. Thirty-six of those are one
 Calibre bug repeated: three empty `<p> </p>` in the `<head>` of each of its

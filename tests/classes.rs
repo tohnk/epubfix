@@ -1921,3 +1921,87 @@ fn a_broken_link_matching_no_heading_is_still_reported() {
         outcome.findings
     );
 }
+
+/// An empty `<body>` is `element "body" incomplete`, not "nothing to do".
+///
+/// A Kobo build of *Essays and Aphorisms* carries one error through a whole
+/// run because of this: an empty XHTML document in the spine, which the
+/// container step skipped on the grounds that there was nothing to wrap.
+#[test]
+fn an_empty_body_gets_the_container_too() {
+    let raw = doc("");
+    let (outcome, after) = fix(&book_raw(&raw));
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("block container")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(ch1(&after).contains("<div>"), "got {}", ch1(&after));
+    assert!(outcome.remaining.is_empty(), "got {:?}", outcome.remaining);
+}
+
+/// HTML5 accepts an empty body and accepts bare inline content, so under
+/// EPUB 3 the container repairs nothing and the edit would be noise on a book
+/// with nothing wrong with it. Measured in both rulesets.
+#[test]
+fn epub3_bodies_are_left_alone_however_thin_their_content() {
+    for body in ["", r#"<img alt="x" src="cover.gif"/>"#] {
+        let before = common::epub3(body, "<p>x</p>");
+        let (outcome, after) = roundtrip_full(&before);
+        assert!(
+            !outcome
+                .changes
+                .iter()
+                .any(|c| c.contains("block container")),
+            "body {body:?} got {:?}",
+            outcome.changes
+        );
+        assert!(
+            !entry(&after, "OEBPS/ch1.xhtml").contains("<div>"),
+            "body {body:?} was wrapped anyway"
+        );
+    }
+}
+
+/// A content document is whatever the manifest says it is. This one is called
+/// `.xml`, which every fixer used to skip on sight while epubcheck validated
+/// it as XHTML and reported the error nobody could fix.
+#[test]
+fn a_content_document_is_found_by_its_media_type_not_its_extension() {
+    let opf = opf(
+        "2.0",
+        r#"    <item id="pm" href="page-map.xml" media-type="application/xhtml+xml"/>"#,
+        r#"<itemref idref="pm"/>"#,
+        "",
+    );
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+        ("OEBPS/page-map.xml", doc("").as_bytes()),
+    ]));
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("block container")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(entry(&after, "OEBPS/page-map.xml").contains("<div>"));
+}
+
+/// The NCX is XML in the package too, and is emphatically not a content
+/// document. Its media type is what keeps it out.
+#[test]
+fn the_ncx_is_not_mistaken_for_a_content_document() {
+    let (outcome, after) = fix(&book2("<p>text</p>"));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert_eq!(entry(&after, "OEBPS/toc.ncx"), NCX);
+}

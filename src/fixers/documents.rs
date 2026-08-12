@@ -239,6 +239,20 @@ impl Fixer for FragmentDocuments {
             // A real document, but one whose body holds nothing a body may
             // directly hold. Wrapping the fragment above without this step
             // trades one error for two, measured.
+            //
+            // EPUB 2 only, and that is not a simplification. Measured, on a
+            // body that is empty and on a body holding only inline content:
+            //
+            //     body            EPUB 2                    EPUB 3
+            //     empty           element "body" incomplete  clean
+            //     inline only     element "p" not allowed …  clean
+            //     <div></div>     clean                      clean
+            //
+            // HTML5 accepts both, so under EPUB 3 the container repairs
+            // nothing and the edit would be pure noise on a valid book.
+            if book.epub_version() >= 3 {
+                continue;
+            }
             let Some(body) = nodes
                 .iter()
                 .position(|n| n.name == "body" && n.kind == NodeKind::Start)
@@ -248,8 +262,10 @@ impl Fixer for FragmentDocuments {
             let Some(close) = nodes[body].close else {
                 continue;
             };
-            let inner = &text[nodes[body].span.end..nodes[close].span.start];
-            if inner.trim().is_empty() || has_block_content(&nodes, body) {
+            // An empty body is not "nothing to do": it is `element "body"
+            // incomplete`, and skipping it here is why a Kobo build of
+            // *Essays and Aphorisms* kept one error through a whole run.
+            if has_block_content(&nodes, body) {
                 continue;
             }
 
