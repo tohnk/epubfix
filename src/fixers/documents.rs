@@ -36,7 +36,7 @@
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::markup::{Edits, Node, NodeKind, scan};
+use crate::markup::{Edits, Node, NodeKind, line_span, scan};
 use crate::refs::resolve_href;
 use crate::util::{basename, dirname};
 
@@ -268,6 +268,109 @@ impl Fixer for FragmentDocuments {
         if boxed > 0 {
             outcome.push_change(format!(
                 "gave {boxed} document(s) the block container XHTML 1.1 requires inside <body>"
+            ));
+        }
+        outcome
+    }
+}
+
+/// Elements a `<head>` may hold.
+///
+/// Deletion is driven by *absence* from this list, so the same rule as
+/// [`BLOCK`] applies in the same direction: an over-long list only makes the
+/// fixer quieter, a short one makes it destroy markup. `object` is here because
+/// XHTML 1.1 permits it in a head even though epubcheck's message does not
+/// bother to mention it.
+const HEAD_CONTENT: &[&str] = &[
+    "base", "link", "meta", "noscript", "object", "script", "style", "title",
+];
+
+/// RSC-005: `element "p" not allowed here; expected … "base", "link", "meta",
+/// "script" or "style"`.
+///
+/// A Calibre conversion of *Girl With Curious Hair* leaves three empty
+/// paragraphs in the `<head>` of every one of its twelve documents:
+///
+/// ```html
+/// <head>
+///   <meta name="author" content="me"/>
+///   <p> </p>
+///   <meta name="creation-time" content="2004-5-26"/>
+/// ```
+///
+/// Thirty-six errors from one conversion bug. They hold a single space, they
+/// are in a part of the document nothing renders, and a `<head>` is the one
+/// place in an EPUB where an element's meaning is entirely structural — so an
+/// empty one there is removable with nothing lost.
+///
+/// One that is *not* empty is reported instead. Text in a `<head>` is text
+/// nobody can see, and where it should go — hoisted into the body, or deleted
+/// as the artefact it probably is — is a judgement about the book, not about
+/// the markup.
+pub struct HeadContent;
+
+impl Fixer for HeadContent {
+    fn name(&self) -> &'static str {
+        "head-content"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "remove empty elements a <head> may not hold, and report any carrying text"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let mut outcome = Outcome::none();
+        let mut removed = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let Some(head) = nodes
+                .iter()
+                .position(|n| n.name == "head" && n.kind == NodeKind::Start)
+            else {
+                continue;
+            };
+            let mut edits = Edits::new();
+
+            // Start and Empty only. A comment is not an element, and treating
+            // one as "not permitted here" would delete it.
+            for node in nodes.iter().filter(|n| {
+                n.parent == Some(head) && matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+            }) {
+                if HEAD_CONTENT.contains(&node.name.as_str()) {
+                    continue;
+                }
+                let inner = match (node.kind, node.close) {
+                    (NodeKind::Empty, _) => "",
+                    (_, Some(close)) => &text[node.span.end..nodes[close].span.start],
+                    _ => continue,
+                };
+                if inner.trim().is_empty() {
+                    edits.delete(line_span(&text, node.element_span(&nodes)));
+                    removed += 1;
+                } else {
+                    outcome.push_finding(format!(
+                        "{}: <{}> in the <head> carries text, which nothing renders there; \
+                         it needs a person to say whether it belongs in the body or nowhere",
+                        basename(&doc),
+                        node.name
+                    ));
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if removed > 0 {
+            outcome.push_change(format!(
+                "removed {removed} empty element(s) a <head> may not hold"
             ));
         }
         outcome

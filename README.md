@@ -35,6 +35,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `empty-metadata` | OPF-054 | removes `<dc:*>` elements with no content, keeping the three both versions require |
 | `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
 | `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
+| `head-content` | RSC-005 | removes empty elements a `<head>` may not hold, and reports any carrying text |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
 | `content-duplicate-ids` | RSC-005 | makes duplicated ids in a content document unique, keeping the first and leaving referenced ones alone |
@@ -45,6 +46,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `misplaced-blockquotes` | RSC-005 | splits a paragraph around a `<blockquote>` it swallowed, or demotes the quotation to a `<span>` |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
 | `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
+| `orphan-links` | RSC-007 | repoints a link whose anchor was discarded at the heading its own text names |
 | `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead stylesheet/script includes, and an `<img>` whose file is proven absent — never an `<a>` |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
 | `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
@@ -146,7 +148,17 @@ meaningless — the whole `@font-face` (a face with no source is nothing), the
 `@import` statement, or just the one declaration.
 
 An `<a>` is never deleted: it carries navigation, and its absence is a defect to
-report. An `<img>` used to be treated the same way, and that was too absolute.
+report — and often a defect that can be repaired instead. *Girl With Curious
+Hair* has a contents page of ten links to Word bookmarks (`href="_Toc73360389"`,
+no `#`, so epubcheck calls it a missing *file*) which Calibre discarded when it
+split the book at those very anchors. Deleting them would validate and would
+delete the book's table of contents. But the link text *is* the destination —
+each of the ten is the exact title of a story, and each story document opens
+with an `<h1>` carrying that title and an id — so `orphan-links` repoints them
+and the contents page works again. The match must be **exact** on
+whitespace-collapsed, case-folded text, and **unique**: two headings with the
+same words means the link is reported, because a contents page pointing at the
+wrong chapter is worse than one pointing nowhere. An `<img>` used to be treated the same way, and that was too absolute.
 The distinction that matters is not the element type but whether the file might
 exist somewhere, and by the time all five candidates have failed it does not —
 not under any path, spelling or case. The choice is then between an element that
@@ -655,7 +667,12 @@ goes from 1 fatal + 11 errors to 0 by being retagged downward.
 0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
 intact, and the NCX identifier synced.
 
-*The Hobbit* goes from 9 errors to 0 and is where the last two classes came
+*Girl With Curious Hair* goes from 46 errors to 0. Thirty-six of those are one
+Calibre bug repeated: three empty `<p> </p>` in the `<head>` of each of its
+twelve documents, in a part of the file nothing renders. The other ten are the
+contents page described above, recovered rather than deleted.
+
+*The Hobbit* goes from 9 errors to 0 and is where two other classes came
 from. Its metadata is padded
 with `<dc:date/>`, `<dc:subject/>`, `<dc:description/>` and `<dc:rights/>`, only
 the first of which epubcheck reports — an empty string is not a W3C date, and

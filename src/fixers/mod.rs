@@ -126,6 +126,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         // Before xhtml-namespace: a fragment has no root <html> for that
         // one to put a namespace on, and comes out of this with a proper one.
         Box::new(documents::FragmentDocuments),
+        Box::new(documents::HeadContent),
         Box::new(attrs::XhtmlNamespace),
         Box::new(ids::XmlIds),
         // After xml-ids, so a sanitised id that collided with an existing one
@@ -142,6 +143,9 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         // Before dangling-resources, which can recover a link this would only
         // delete.
         Box::new(opf::GuideReferences),
+        // Also before it: a link this can repair is one that would otherwise
+        // be reported as pointing at nothing.
+        Box::new(resources::OrphanLinks),
         Box::new(resources::DanglingResources {
             images: !opts.keep_missing_images,
         }),

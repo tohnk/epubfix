@@ -660,6 +660,141 @@ impl Fixer for DeadSchemes {
     }
 }
 
+/// RSC-007 on a link whose anchor no longer exists anywhere.
+///
+/// *Girl With Curious Hair* has a contents page of ten links written by Word
+/// and then split by Calibre:
+///
+/// ```html
+/// <a href="_Toc73360389"><span>LITTLE EXPRESSIONLESS ANIMALS</span></a>
+/// ```
+///
+/// `_Toc73360389` is a Word bookmark. It has no `#`, so epubcheck reads it as a
+/// relative *file* path and reports a missing resource rather than a missing
+/// fragment; and the bookmark itself is gone, because Calibre split the book at
+/// those very anchors and discarded the ids. Nothing in the archive is called
+/// `_Toc73360389` and no id of that name survives.
+///
+/// Deleting the links would validate. It would also delete the book's table of
+/// contents — those ten are the ten stories — which is why an `<a>` is never
+/// deleted and why the honest answer here is a repair rather than a removal.
+///
+/// # The recovery
+///
+/// The link text *is* the destination: each of the ten is the exact title of a
+/// story, and each story document opens with an `<h1>` carrying that title and
+/// an id Calibre minted. So a broken link whose text equals exactly one heading
+/// in the book is repointed at that heading.
+///
+/// This is deterministic, not fuzzy, and the two conditions are what make it
+/// safe. **Exact** equality, on whitespace-collapsed and case-folded text, so
+/// nothing is inferred from a resemblance. And **unique**: if two headings
+/// carry the same words the link is left alone and reported, because a table of
+/// contents pointing at the wrong chapter is worse than one that does not
+/// point anywhere. On this book all ten resolve uniquely, including *Girl With
+/// Curious Hair*, whose title also appears on the title page — as a `<p>`, not
+/// a heading.
+pub struct OrphanLinks;
+
+const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+
+/// Every heading in the book, keyed by its text, with the ones that are not
+/// unique kept so they can be recognised as ambiguous rather than silently
+/// resolving to whichever was seen first.
+fn heading_index(book: &Book) -> HashMap<String, Vec<(String, Option<String>)>> {
+    let mut index: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
+    for doc in book.markup_names() {
+        let Some(text) = book.text(&doc) else { continue };
+        let Ok(nodes) = scan(text) else { continue };
+        for node in nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Start && HEADINGS.contains(&n.name.as_str()))
+        {
+            let key = label(text, &nodes, node).to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            let id = id_attrs(node).next().map(|a| a.value.clone());
+            index.entry(key).or_default().push((doc.clone(), id));
+        }
+    }
+    index
+}
+
+impl Fixer for OrphanLinks {
+    fn name(&self) -> &'static str {
+        "orphan-links"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-007"]
+    }
+    fn description(&self) -> &'static str {
+        "repoint a link whose anchor was discarded at the heading its own text names"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let mut outcome = Outcome::none();
+        let resolver = Resolver::new(book);
+        let headings = heading_index(book);
+        if headings.is_empty() {
+            return outcome;
+        }
+        let mut recovered = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for node in nodes.iter().filter(|n| n.name == "a") {
+                let Some(href) = node.attr("href") else {
+                    continue;
+                };
+                // Fire on the observed error only: a link that already lands
+                // somewhere is not this fixer's business.
+                if !matches!(resolver.resolve(&doc, &href.value), Resolution::Missing) {
+                    continue;
+                }
+                let key = label(&text, &nodes, node).to_lowercase();
+                let Some(hits) = headings.get(&key) else {
+                    continue;
+                };
+                let [(target, id)] = hits.as_slice() else {
+                    outcome.push_finding(format!(
+                        "{}: <a> to \"{}\" reads \"{key}\", and {} headings say that, so there \
+                         is no way to tell which was meant",
+                        basename(&doc),
+                        href.value,
+                        hits.len()
+                    ));
+                    continue;
+                };
+                let rel = relative_to(&doc, target);
+                let value = match id {
+                    Some(id) => format!("{rel}#{id}"),
+                    None => rel,
+                };
+                edits.replace(href.span.clone(), format!("href=\"{value}\""));
+                recovered += 1;
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if recovered > 0 {
+            outcome.push_change(format!(
+                "repointed {recovered} link(s) with no surviving anchor at the heading their \
+                 text names"
+            ));
+        }
+        outcome
+    }
+}
+
 #[cfg(test)]
 mod scheme_tests {
     use super::scheme_of;

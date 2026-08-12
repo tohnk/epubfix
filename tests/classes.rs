@@ -1747,3 +1747,177 @@ fn a_processing_instruction_in_the_metadata_is_harmless() {
     assert!(opf_of(&after).contains("<?calibre"), "got {}", opf_of(&after));
     assert!(!opf_of(&after).contains("<dc:rights"));
 }
+
+// ---------------------------------------------------------------------------
+// head-content
+// ---------------------------------------------------------------------------
+
+/// A book whose chapter head holds `extra` on top of the usual title.
+fn book_head(extra: &str) -> Vec<u8> {
+    let ch1 = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+         <head><title>T</title>\n{extra}\n</head>\n<body>\n<p>text</p>\n</body></html>"
+    );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/s.css", b"p { margin: 0 }"),
+    ])
+}
+
+/// Calibre leaves three of these in the head of every document it writes.
+#[test]
+fn an_empty_paragraph_in_the_head_is_removed() {
+    let (outcome, after) = fix(&book_head("<p> </p>\n<p> </p>"));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("<head>")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!ch1(&after).contains("<p> </p>"), "got {}", ch1(&after));
+    assert!(ch1(&after).contains("<p>text</p>"), "the body is untouched");
+}
+
+/// Everything a head may legally hold stays, including a `<meta>` between the
+/// paragraphs that were removed.
+#[test]
+fn legal_head_content_is_untouched() {
+    let (_, after) = fix(&book_head(
+        "<meta name=\"author\" content=\"me\"/>\n<p> </p>\n<link href=\"s.css\" rel=\"stylesheet\"/>",
+    ));
+    let got = ch1(&after);
+    assert!(got.contains(r#"<meta name="author" content="me"/>"#), "got {got}");
+    assert!(got.contains("s.css"), "got {got}");
+    let head = got.split_once("<head>").unwrap().1.split_once("</head>").unwrap().0;
+    assert!(!head.contains("<p>"), "got {head}");
+    assert!(got.contains("<p>text</p>"), "the body keeps its own: {got}");
+}
+
+/// Text in a head is text nobody can see, and where it should go is a
+/// judgement about the book rather than about the markup.
+#[test]
+fn a_head_element_carrying_text_is_reported_not_deleted() {
+    let (outcome, after) = fix(&book_head("<p>a stray sentence</p>"));
+    assert!(
+        ch1(&after).contains("a stray sentence"),
+        "got {}",
+        ch1(&after)
+    );
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("<head>")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+/// A comment is not an element, and "not permitted here" must not reach it.
+#[test]
+fn a_comment_in_the_head_survives() {
+    let (_, after) = fix(&book_head("<!-- calibre -->"));
+    assert!(ch1(&after).contains("<!-- calibre -->"), "got {}", ch1(&after));
+}
+
+// ---------------------------------------------------------------------------
+// orphan-links
+// ---------------------------------------------------------------------------
+
+/// A contents page linking at Word bookmarks Calibre discarded, plus the two
+/// story documents whose headings those links name.
+fn book_toc(contents: &str, h1: &str, h2: &str) -> Vec<u8> {
+    let opf = opf(
+        "2.0",
+        concat!(
+            r#"    <item id="s1" href="s1.xhtml" media-type="application/xhtml+xml"/>"#,
+            "\n",
+            r#"    <item id="s2" href="s2.xhtml" media-type="application/xhtml+xml"/>"#
+        ),
+        r#"<itemref idref="s1"/><itemref idref="s2"/>"#,
+        "",
+    );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(contents).as_bytes()),
+        ("OEBPS/s1.xhtml", doc(h1).as_bytes()),
+        ("OEBPS/s2.xhtml", doc(h2).as_bytes()),
+    ])
+}
+
+/// The Girl With Curious Hair case: the link text is the destination.
+#[test]
+fn a_link_whose_anchor_was_discarded_is_repointed_at_its_heading() {
+    let (outcome, after) = fix(&book_toc(
+        r#"<p><a href="_Toc73360389"><span>LYNDON</span></a></p>"#,
+        r#"<h1 id="pb_3">LYNDON</h1><p>Hello down there.</p>"#,
+        r#"<h1 id="pb_4">JOHN BILLY</h1><p>Was me supposed to tell.</p>"#,
+    ));
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("repointed 1")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        ch1(&after).contains(r#"href="s1.xhtml#pb_3""#),
+        "got {}",
+        ch1(&after)
+    );
+    assert!(
+        ch1(&after).contains("<span>LYNDON</span>"),
+        "the link text is untouched: {}",
+        ch1(&after)
+    );
+    assert!(outcome.remaining.is_empty(), "got {:?}", outcome.remaining);
+}
+
+/// A contents page pointing at the wrong chapter is worse than one that points
+/// nowhere, so two headings with the same words resolve to neither.
+#[test]
+fn an_ambiguous_heading_is_reported_rather_than_guessed_at() {
+    let (outcome, after) = fix(&book_toc(
+        r#"<p><a href="_Toc1">LYNDON</a></p>"#,
+        r#"<h1 id="a">LYNDON</h1><p>one</p>"#,
+        r#"<h1 id="b">LYNDON</h1><p>two</p>"#,
+    ));
+
+    assert!(ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("2 headings")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+/// Fire on the observed error. A link that already lands somewhere is not this
+/// fixer's business, whatever its text says.
+#[test]
+fn a_working_link_is_never_repointed_by_its_text() {
+    let (outcome, after) = fix(&book_toc(
+        r#"<p><a href="s2.xhtml">LYNDON</a></p>"#,
+        r#"<h1 id="pb_3">LYNDON</h1><p>one</p>"#,
+        r#"<h1 id="pb_4">JOHN BILLY</h1><p>two</p>"#,
+    ));
+    assert!(ch1(&after).contains(r#"href="s2.xhtml""#), "got {}", ch1(&after));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+}
+
+/// No heading says what the link says, so there is nothing to aim at and the
+/// existing report stands.
+#[test]
+fn a_broken_link_matching_no_heading_is_still_reported() {
+    let (outcome, after) = fix(&book_toc(
+        r#"<p><a href="_Toc1">SOMETHING ELSE ENTIRELY</a></p>"#,
+        r#"<h1 id="a">LYNDON</h1><p>one</p>"#,
+        r#"<h1 id="b">JOHN BILLY</h1><p>two</p>"#,
+    ));
+    assert!(ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("_Toc1")),
+        "got {:?}",
+        outcome.findings
+    );
+}
