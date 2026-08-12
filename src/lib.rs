@@ -258,6 +258,10 @@ pub fn fix_file(path: &Path, opts: &Options) -> Result<Outcome> {
     if opts.only.is_empty() {
         outcome.merge(finish_book(&mut book));
     }
+    // What is still wrong with the book as it now stands. Reported rather than
+    // counted, because "epubfix changed some bytes" and "this book is in good
+    // order" are different claims and only the first one is ours to make.
+    outcome.remaining = verify::remaining(&book);
     if !outcome.has_changes() || opts.dry_run {
         return Ok(outcome);
     }

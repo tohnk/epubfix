@@ -184,6 +184,62 @@ fn list_fixers() {
 
 /// Where to look when the user gave no paths: the folder holding the executable,
 /// falling back to the working directory if that cannot be determined.
+/// Report one book, and say whether it was changed.
+///
+/// What is still wrong is said right where the work is reported, so a long
+/// sweep cannot leave the impression that a book came out in good order when
+/// it did not.
+fn report_book(name: &str, outcome: &epubfix::Outcome, dry_run: bool) -> bool {
+    let left = match outcome.remaining.len() {
+        0 => String::new(),
+        1 => "1 problem still remains".to_string(),
+        n => format!("{n} problems still remain"),
+    };
+    if outcome.has_changes() {
+        let label = if dry_run { " (dry run)" } else { "" };
+        println!("{name}:{label}\n    {}", outcome.changes.join("\n    "));
+        if !left.is_empty() {
+            println!("    ...but {left}.");
+        }
+        return true;
+    }
+    if left.is_empty() {
+        println!("{name}: nothing to do");
+    } else {
+        println!("{name}: nothing I can fix, and {left}.");
+    }
+    false
+}
+
+/// Print a per-book list, skipping books with nothing in it.
+fn report_section(heading: &str, entries: &[(String, Vec<String>)]) {
+    if entries.iter().all(|(_, lines)| lines.is_empty()) {
+        return;
+    }
+    println!("\n{heading}");
+    for (name, lines) in entries.iter().filter(|(_, l)| !l.is_empty()) {
+        println!("  {name}");
+        for line in lines {
+            println!("      {line}");
+        }
+    }
+}
+
+/// True if one of `findings` is already about the same file as `residual`.
+///
+/// The final scan and the fixers overlap by design — `dangling-resources`
+/// declines to delete an `<img>` and reports it, and the scan then sees the
+/// link it left behind. Both are right; printing both is the same defect twice.
+/// Matching on the last path segment is enough, since the two describe it
+/// differently ("images/logo.jpg" against "OEBPS/images/logo.jpg").
+fn already_explained(residual: &str, findings: &[String]) -> bool {
+    residual
+        .split('"')
+        .nth(1)
+        .map(|target| target.rsplit('/').next().unwrap_or(target))
+        .is_some_and(|leaf| !leaf.is_empty() && findings.iter().any(|f| f.contains(leaf)))
+}
+
 fn default_dir() -> PathBuf {
     env::current_exe()
         .ok()
@@ -224,6 +280,7 @@ fn main() -> ExitCode {
 
     let (mut fixed, mut clean, mut failed) = (0u32, 0u32, 0u32);
     let mut attention: Vec<(String, Vec<String>)> = Vec::new();
+    let mut unresolved: Vec<(String, Vec<String>)> = Vec::new();
     for p in &targets {
         let name = p.file_name().map_or_else(
             || p.display().to_string(),
@@ -231,16 +288,24 @@ fn main() -> ExitCode {
         );
         match fix_file(p, &args.opts) {
             Ok(outcome) => {
-                if outcome.has_changes() {
-                    let label = if args.opts.dry_run { " (dry run)" } else { "" };
-                    println!("{name}:{label}\n    {}", outcome.changes.join("\n    "));
-                    fixed += 1;
-                } else {
-                    println!("{name}: nothing to do");
-                    clean += 1;
+                match report_book(&name, &outcome, args.opts.dry_run) {
+                    true => fixed += 1,
+                    false if outcome.remaining.is_empty() => clean += 1,
+                    false => {}
                 }
+                // A residual whose subject a finding already named is the same
+                // defect said twice, so only the unexplained ones are listed.
+                let unexplained: Vec<String> = outcome
+                    .remaining
+                    .iter()
+                    .filter(|r| !already_explained(r, &outcome.findings))
+                    .cloned()
+                    .collect();
                 if !outcome.findings.is_empty() {
-                    attention.push((name, outcome.findings));
+                    attention.push((name.clone(), outcome.findings));
+                }
+                if !outcome.remaining.is_empty() {
+                    unresolved.push((name, unexplained));
                 }
             }
             Err(e) => {
@@ -250,26 +315,29 @@ fn main() -> ExitCode {
         }
     }
 
-    if !attention.is_empty() {
-        println!("\nNeeds manual attention:");
-        for (name, findings) in &attention {
-            println!("  {name}");
-            for f in findings {
-                println!("      {f}");
-            }
-        }
-    }
+    report_section("Needs manual attention:", &attention);
+    report_section(
+        "Still wrong afterwards, and nothing above explains it:",
+        &unresolved,
+    );
 
     let verb = if args.opts.dry_run {
         "would fix"
     } else {
         "fixed"
     };
-    print!("\nDone: {fixed} {verb}, {clean} already clean, {failed} failed");
-    if attention.is_empty() {
+    print!("\nDone: {fixed} {verb}, {clean} nothing to do, {failed} failed");
+    if !attention.is_empty() {
+        print!(", {} needing a look", attention.len());
+    }
+    if unresolved.is_empty() {
         println!(".");
     } else {
-        println!(", {} needing a look.", attention.len());
+        println!(", {} not fully repaired.", unresolved.len());
+        // Said once, at the end, because the counts above invite exactly the
+        // wrong inference: epubfix looks for a handful of things, and a book it
+        // has nothing to say about is not thereby a valid EPUB.
+        println!("epubfix checks far less than EPUB Check does — run that for the real answer.");
     }
 
     // Launched by double-click, the console closes the moment we return.
@@ -286,7 +354,7 @@ fn main() -> ExitCode {
     // broke, 3 means everything worked but some books want a human.
     if failed > 0 {
         ExitCode::FAILURE
-    } else if attention.is_empty() {
+    } else if attention.is_empty() && unresolved.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(3)

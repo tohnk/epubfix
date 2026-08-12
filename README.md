@@ -530,6 +530,36 @@ against the book and finding it had nothing to say — which is the rule's
 corollary: **verify by re-running epubcheck, not by reasoning about the fix.**
 The error count must strictly decrease and no new error *code* may appear.
 
+### What it does not claim
+
+A run ends by scanning the finished book again and saying what is still wrong:
+
+```
+book.epub:
+    made 1 duplicated id(s) unique
+    ...but 1 problem still remains.
+other.epub: nothing I can fix, and 2 problems still remain.
+
+Done: 1 fixed, 0 nothing to do, 0 failed, 2 not fully repaired.
+epubfix checks far less than EPUB Check does — run that for the real answer.
+```
+
+The point is the wording. "Fixed" used to be the only thing the summary said,
+and on a book with defects no fixer covers that reads as *this book is now in
+good order* — a claim epubfix is in no position to make. It changed some bytes;
+whether the result validates is a different question and belongs to EPUB Check.
+
+The check reuses the differential gate's defect model, which covers duplicate
+ids, links to files that are not there, and fragments that resolve to nothing.
+That is a small fraction of what EPUB Check looks at, so **silence here is not
+validity** — which is why the caveat prints alongside the counts rather than
+being left for the reader to infer. Exit status 3 covers this as well as
+findings, so a library sweep can be scripted on it.
+
+A residual whose subject a finding already named is not printed twice:
+`dangling-resources` declining to delete an `<img>` and the final scan seeing
+the link it left behind are the same defect from two directions.
+
 ### The fixture suite, and one deliberate disagreement
 
 `epubfix-fixtures/run_suite.py` diffs EPUBCheck before and after across eight

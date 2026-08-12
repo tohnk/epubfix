@@ -101,6 +101,17 @@ fn is_linky(name: &str) -> bool {
 /// Deliberately *not* an assertion of correctness — plenty of real books are
 /// already missing a stylesheet or pointing at an anchor that was never there.
 /// The point is to be able to subtract one set from another.
+/// Problems this tool can see in a book, as it stands.
+///
+/// Deliberately narrow, and narrower than epubcheck by a long way: duplicate
+/// ids, links to files that are not there, fragments that resolve to nothing.
+/// It exists to answer "did this operation make anything worse", and it is
+/// reused at the end of a run to answer "is there anything left I can see" —
+/// which is a different and much weaker claim than "this book is now valid".
+pub fn remaining(book: &Book) -> Vec<String> {
+    defects(book).into_iter().collect()
+}
+
 fn defects(book: &Book) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let present: HashSet<&str> = book.names().iter().map(String::as_str).collect();

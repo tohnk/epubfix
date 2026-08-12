@@ -37,6 +37,14 @@ pub struct Outcome {
     pub changes: Vec<String>,
     /// One line per problem left alone for a human to judge.
     pub findings: Vec<String>,
+    /// Problems still visible in the finished book that no fixer covers.
+    ///
+    /// Distinct from `findings`, which are things a fixer looked at and
+    /// declined. These are things nothing looked at, and the reason they are
+    /// reported separately is that "I changed some bytes" and "the book is now
+    /// in good order" are different claims, and the summary line was quietly
+    /// making the second one.
+    pub remaining: Vec<String>,
 }
 
 impl Outcome {
@@ -48,15 +56,15 @@ impl Outcome {
     pub fn change(msg: impl Into<String>) -> Self {
         Outcome {
             changes: vec![msg.into()],
-            findings: Vec::new(),
+            ..Outcome::default()
         }
     }
 
     /// An outcome carrying a single thing that needs a human.
     pub fn finding(msg: impl Into<String>) -> Self {
         Outcome {
-            changes: Vec::new(),
             findings: vec![msg.into()],
+            ..Outcome::default()
         }
     }
 
@@ -71,6 +79,7 @@ impl Outcome {
     pub fn merge(&mut self, other: Outcome) {
         self.changes.extend(other.changes);
         self.findings.extend(other.findings);
+        self.remaining.extend(other.remaining);
     }
 
     /// True if the book was modified. This, not `is_empty`, decides whether the
@@ -80,7 +89,7 @@ impl Outcome {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty() && self.findings.is_empty()
+        self.changes.is_empty() && self.findings.is_empty() && self.remaining.is_empty()
     }
 }
 
