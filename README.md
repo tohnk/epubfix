@@ -41,10 +41,13 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
 | `head-content` | RSC-005 | removes empty elements a `<head>` may not hold, and reports any carrying text |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
-| `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
+| `anchor-names` | RSC-005 | replaces the `name` attribute XHTML 1.1 removed from `<a>` with the `id` it stood for |
+| `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names — in content documents and the NCX — and every fragment pointing at them |
 | `duplicate-ids` | RSC-005 | makes duplicated ids unique in content documents and the NCX alike, keeping the first and leaving referenced ones alone |
 | `data-attributes` | HTM_061 | removes custom data attributes whose names HTML5 rejects (Kindle's `data-AmznRemoved`) |
+| `keyword-case` | RSC-005 | lower-cases an enumerated attribute value (`dir="LTR"`, `valign="TOP"`) that XHTML 1.1 spells in lower case |
 | `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
+| `underline-elements` | RSC-005 | turns the removed `<u>` into a `<span>` that still underlines |
 | `img-alt` | RSC-005 | adds `alt=""` to decorative images in EPUB 2, and reports the rest rather than inventing captions |
 | `nested-anchors` | RSC-005 | unwraps an `<a>` nested inside another, keeping its text and rehoming any id on a `<span>` |
 | `misplaced-blockquotes` | RSC-005 | splits a paragraph around a `<blockquote>` it swallowed, or demotes the quotation to a `<span>` |
@@ -744,6 +747,20 @@ goes from 1 fatal + 11 errors to 0 by being retagged downward.
 *Butcher's Crossing* — the book the path work came from — goes from 3 errors to
 0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
 intact, and the NCX identifier synced.
+
+*The Hero of Ages* is the worst book in the library and goes from **1049 errors
+and 96 warnings to 0 and 0**. All of it is six habits of one converter, repeated
+across 95 documents: `<a name="x" id="x">` on every anchor (303), ids that are
+UUIDs or start with a digit (172), spaces in every filename (191), `<body
+text="#000000" link="#0000ff" dir="LTR">` (285), `width` on 75 table cells, and
+four `<u>` elements. Nothing in it is unusual; there is simply a lot of it.
+
+It also exposed a bug this tool had introduced. `<a name="x" id="x">` is the
+legacy anchor pattern — one identity written twice on purpose, and required to
+match — but `duplicate-ids` counted the two attributes separately, saw a
+duplicate that was not there, and renamed the id to `x_2`. It reported "made 303
+duplicated id(s) unique" while desynchronising 303 anchors. Identity is now
+counted per element.
 
 *A New History of Western Philosophy* goes from 4 errors to 0, and is the book
 that produced the rollback guarantee above.

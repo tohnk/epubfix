@@ -271,7 +271,10 @@ fn form_control_names_are_left_alone_but_anchor_names_are_fixed() {
     let doc = ch1(&after);
 
     assert!(doc.contains(r#"<input name="user:email"/>"#), "{doc}");
-    assert!(doc.contains(r#"<a name="id_1bad">"#), "{doc}");
+    // The anchor's `name` is not merely mis-spelled, it is an attribute XHTML
+    // 1.1 removed, so it becomes the `id` it stood for and is then sanitised.
+    assert!(doc.contains(r#"<a id="id_1bad">"#), "{doc}");
+    assert!(!doc.contains("<a name="), "{doc}");
     assert!(
         outcome.changes.iter().any(|c| c == "sanitised 1 id(s)"),
         "{:?}",

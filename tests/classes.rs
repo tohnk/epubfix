@@ -2456,3 +2456,209 @@ fn a_utf8_book_is_not_re_encoded() {
         outcome.changes
     );
 }
+
+// ---------------------------------------------------------------------------
+// The Hero of Ages: 1049 errors from six habits
+// ---------------------------------------------------------------------------
+
+/// `<a name="x" id="x">` is the legacy anchor pattern — one identity written
+/// twice on purpose. Counting the two attributes separately saw a duplicate
+/// that was not there and renamed the id to `x_2`, breaking the pair. One real
+/// book had 303 of them.
+#[test]
+fn an_anchors_matching_name_and_id_are_not_a_duplicate() {
+    let (_, after) = fix(&book2(r#"<p><a name="x" id="x">anchor</a></p>"#));
+    let got = ch1(&after);
+    assert!(!got.contains("x_2"), "the pair is not a duplicate: {got}");
+    assert!(got.contains(r#"id="x""#), "got {got}");
+}
+
+/// XHTML 1.1 removed `name` from `<a>`, and it almost always duplicates the id.
+#[test]
+fn an_anchor_name_that_repeats_the_id_is_dropped() {
+    let (outcome, after) = fix(&book2(r#"<p><a name="x" id="x">anchor</a></p>"#));
+    let got = ch1(&after);
+    assert!(!got.contains("name="), "got {got}");
+    assert!(got.contains(r#"<a id="x">anchor</a>"#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("<a name>")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// With no id, the name *is* the id and becomes one, so links keep landing.
+#[test]
+fn an_anchor_name_with_no_id_becomes_the_id() {
+    let (_, after) = fix(&book2(
+        r##"<p><a name="x">anchor</a></p><p><a href="#x">to it</a></p>"##,
+    ));
+    let got = ch1(&after);
+    assert!(got.contains(r#"<a id="x">"#), "got {got}");
+    assert!(got.contains(r##"href="#x""##), "the link still resolves: {got}");
+}
+
+/// HTML5 accepts `name` on an anchor, so an EPUB 3 book is left alone.
+#[test]
+fn anchor_names_are_untouched_in_epub3() {
+    let before = common::epub3(r#"<p><a name="x" id="x">anchor</a></p>"#, "<p>y</p>");
+    let (outcome, after) = roundtrip_full(&before);
+    assert!(
+        entry(&after, "OEBPS/ch1.xhtml").contains(r#"name="x""#),
+        "got {}",
+        entry(&after, "OEBPS/ch1.xhtml")
+    );
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("<a name>")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// `<body text link>` is an error under *both* rulesets, unlike the table
+/// attributes it sits beside.
+#[test]
+fn presentational_body_attributes_are_stripped() {
+    for v3 in [false, true] {
+        let before = if v3 {
+            common::epub3("<p>text</p>", "<p>y</p>")
+        } else {
+            common::epub2("<p>text</p>", "<p>y</p>")
+        };
+        // Put the attributes on the body of the built book.
+        let patched: Vec<(String, Vec<u8>)> = read_epub(&before)
+            .into_iter()
+            .map(|(n, d)| {
+                if n == "OEBPS/ch1.xhtml" {
+                    let t = String::from_utf8(d).unwrap().replace(
+                        "<body>",
+                        r##"<body text="#000000" link="#0000ff" bgcolor="#fff">"##,
+                    );
+                    (n, t.into_bytes())
+                } else {
+                    (n, d)
+                }
+            })
+            .collect();
+        let rebuilt: Vec<(&str, &[u8])> =
+            patched.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+        let (outcome, after) = roundtrip_full(&make_epub(&rebuilt));
+
+        let got = entry(&after, "OEBPS/ch1.xhtml");
+        for gone in ["text=", "link=", "bgcolor="] {
+            assert!(!got.contains(gone), "v3={v3} {gone} survived: {got}");
+        }
+        assert!(
+            outcome.changes.iter().any(|c| c.contains("legacy attribute")),
+            "v3={v3} got {:?}",
+            outcome.changes
+        );
+    }
+}
+
+/// XHTML 1.1 spells its enumerated keywords in lower case, so `dir="LTR"` is a
+/// bad *value*, not a bad attribute.
+#[test]
+fn an_uppercase_keyword_value_is_lowercased() {
+    let (outcome, after) = fix(&book2(
+        r#"<table><tr><td valign="TOP">c</td></tr></table>"#,
+    ));
+    assert!(ch1(&after).contains(r#"valign="top""#), "got {}", ch1(&after));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("lower-cased")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// A value that is not one of the keywords at all is a different defect, and
+/// lower-casing it would dress the error up rather than repair it.
+#[test]
+fn a_value_that_is_not_a_keyword_is_left_for_the_report() {
+    let (outcome, after) = fix(&book2(r#"<p><span dir="sideways">x</span></p>"#));
+    assert!(ch1(&after).contains(r#"dir="sideways""#), "got {}", ch1(&after));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("lower-cased")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// HTML5 matches enumerated values case-insensitively, so EPUB 3 is untouched.
+#[test]
+fn keyword_case_is_not_touched_in_epub3() {
+    let before = common::epub3(r#"<p><span dir="LTR">x</span></p>"#, "<p>y</p>");
+    let (outcome, after) = roundtrip_full(&before);
+    assert!(entry(&after, "OEBPS/ch1.xhtml").contains(r#"dir="LTR""#));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("lower-cased")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// `<u>` is gone from XHTML 1.1. A `<span>` is legal in its place, but only
+/// keeps the underline if something still says so.
+#[test]
+fn a_u_element_becomes_a_span_that_still_underlines() {
+    let (outcome, after) = fix(&book2("<p><u>underlined</u></p>"));
+    let got = ch1(&after);
+    assert!(!got.contains("<u>"), "got {got}");
+    assert!(got.contains("text-decoration: underline"), "got {got}");
+    assert!(got.contains("underlined</span>"), "the text stays: {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("<u>")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// When the book's own stylesheet already underlines the class, the `<span>`
+/// needs no inline style — the same question `legacy-table-attrs` asks.
+#[test]
+fn a_u_whose_class_already_underlines_gets_no_inline_style() {
+    let (_, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        (
+            "OEBPS/content.opf",
+            opf(
+                "2.0",
+                r#"    <item id="c" href="s.css" media-type="text/css"/>"#,
+                "",
+                "",
+            )
+            .as_bytes(),
+        ),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        (
+            "OEBPS/ch1.xhtml",
+            doc(r#"<p><u class="ul">underlined</u></p>"#)
+                .replace("</head>", r#"<link rel="stylesheet" type="text/css" href="s.css"/></head>"#)
+                .as_bytes(),
+        ),
+        ("OEBPS/s.css", b".ul { text-decoration: underline }"),
+    ]));
+    let got = ch1(&after);
+    assert!(got.contains(r#"<span class="ul">"#), "got {got}");
+    assert!(!got.contains("style="), "got {got}");
+}
+
+/// The NCX has ids too, and they must be XML Names. One real book names every
+/// navPoint with a UUID; 61 of 96 start with a digit.
+#[test]
+fn ncx_ids_that_are_not_xml_names_are_sanitised() {
+    let ncx = NCX.replace(r#"id="n1""#, r#"id="96bb9689-dcf8-4189""#);
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", ncx.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+    ]));
+    let got = entry(&after, "OEBPS/toc.ncx");
+    assert!(got.contains(r#"id="id_96bb9689"#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("sanitised")),
+        "got {:?}",
+        outcome.changes
+    );
+}

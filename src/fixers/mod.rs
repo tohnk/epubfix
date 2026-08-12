@@ -132,14 +132,18 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(documents::FragmentDocuments),
         Box::new(documents::HeadContent),
         Box::new(attrs::XhtmlNamespace),
+        // Before xml-ids: a name it removes is one less id to sanitise.
+        Box::new(attrs::AnchorNames),
         Box::new(ids::XmlIds),
         // After xml-ids, so a sanitised id that collided with an existing one
         // is seen as the duplicate it now is. Covers the NCX too.
         Box::new(ids::DuplicateIds),
         Box::new(attrs::DataAttributes),
+        Box::new(attrs::KeywordCase),
         Box::new(tables::LegacyTableAttrs {
             mode: opts.presentation,
         }),
+        Box::new(legacy_html::UnderlineElements),
         Box::new(legacy_html::ImgAlt),
         Box::new(nesting::NestedAnchors),
         Box::new(nesting::MisplacedBlockquotes),

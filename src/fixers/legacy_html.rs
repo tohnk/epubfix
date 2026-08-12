@@ -10,7 +10,7 @@ use regex::Regex;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::markup::{Edits, scan};
+use crate::markup::{Edits, scan, NodeKind};
 use crate::util::{basename, re};
 
 // ---------------------------------------------------------------------------
@@ -151,5 +151,84 @@ impl Fixer for VersionMismatch {
             ));
         }
         outcome
+    }
+}
+
+/// RSC-005: `element "u" not allowed anywhere`.
+///
+/// XHTML 1.1 dropped the purely presentational `<u>`; HTML5 brought it back
+/// with a meaning, so this is EPUB 2 only — measured, the same document is
+/// clean under EPUB 3.
+///
+/// The element becomes a `<span>`, which is legal exactly where `<u>` was and
+/// carries the same content model, so nothing moves. What matters is that the
+/// text stays underlined: `<u>` had that behaviour from the user-agent
+/// stylesheet, and a `<span>` has none. So the book's own stylesheet is asked
+/// first — the same question `legacy-table-attrs` asks before stripping. If a
+/// rule already underlines the element through one of its classes, the `<span>`
+/// needs nothing; if not, the declaration is written inline, because losing the
+/// underline is a visible change and this repair is meant to be invisible.
+pub struct UnderlineElements;
+
+impl Fixer for UnderlineElements {
+    fn name(&self) -> &'static str {
+        "underline-elements"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "turn the removed <u> element into a <span> that still underlines"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        if book.epub_version() >= 3 {
+            return Outcome::none();
+        }
+        let sheet = crate::fixers::tables::author_styles(book);
+        let mut converted = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for (i, node) in nodes.iter().enumerate() {
+                if node.name != "u" || node.kind == NodeKind::End {
+                    continue;
+                }
+                let classes = node.attr("class").map_or("", |a| a.value.as_str());
+                let styled = sheet.declares("u", classes, "text-decoration")
+                    || sheet.declares("span", classes, "text-decoration");
+
+                // Everything the element already carries, minus the name.
+                let inner = &text[node.name_end..node.span.end - 1];
+                let inner = inner.trim_end_matches('/');
+                let extra = if styled {
+                    String::new()
+                } else {
+                    " style=\"text-decoration: underline\"".to_string()
+                };
+                edits.replace(node.span.clone(), format!("<span{inner}{extra}>"));
+                if let Some(close) = node.close {
+                    edits.replace(nodes[close].span.clone(), "</span>".to_string());
+                }
+                let _ = i;
+                converted += 1;
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if converted == 0 {
+            return Outcome::none();
+        }
+        Outcome::change(format!(
+            "turned {converted} <u> element(s) into underlined <span>s"
+        ))
     }
 }

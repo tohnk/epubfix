@@ -59,7 +59,16 @@ impl Fixer for XmlIds {
 
     fn apply(&self, book: &mut Book) -> Outcome {
         let mut outcome = Outcome::none();
-        let docs = book.markup_names();
+        // The NCX has ids and they have to be XML Names just as much: one real
+        // book names every navPoint with a UUID, and 61 of the 96 start with a
+        // digit, which an XML Name may not. Content documents alone left those
+        // untouched through a whole run.
+        let mut docs = book.markup_names();
+        if let Some(ncx) = book.ncx_name().map(str::to_owned)
+            && !docs.contains(&ncx)
+        {
+            docs.push(ncx);
+        }
 
         // Pass 1: per document, decide what each bad id becomes.
         let mut renames: HashMap<(String, String), String> = HashMap::new();
@@ -217,7 +226,20 @@ impl Fixer for DuplicateIds {
             let mut seen: HashSet<String> = HashSet::new();
             let mut edits = Edits::new();
 
-            for attr in nodes.iter().flat_map(id_attrs) {
+            // Per element, not per attribute. `<a name="x" id="x">` is the
+            // legacy anchor pattern -- one identity written twice on purpose,
+            // and required to match -- so counting the attributes separately
+            // saw a duplicate that was not there and renamed the id to `x_2`,
+            // desynchronising the pair. One real book had 303 of them.
+            for attr in nodes.iter().flat_map(|n| {
+                let mut own: Vec<&crate::markup::Attr> = Vec::new();
+                for a in id_attrs(n) {
+                    if !own.iter().any(|b| b.value == a.value) {
+                        own.push(a);
+                    }
+                }
+                own
+            }) {
                 // The first one keeps the name, so every link that resolves
                 // today still resolves to the same element afterwards.
                 if seen.insert(attr.value.clone()) {

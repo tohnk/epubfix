@@ -190,6 +190,203 @@ impl Fixer for XhtmlNamespace {
     }
 }
 
+/// RSC-005: `attribute "name" not allowed here` on an `<a>`.
+///
+/// `<a name="x">` is how anchors were written before `id` existed, and XHTML 1.1
+/// removed it — measured, an EPUB 2 book carrying one is an error whether or not
+/// it also has an `id`, while an EPUB 3 book is clean either way. So this is
+/// EPUB 2 only.
+///
+/// Almost always the name simply duplicates the id, because that is what every
+/// converter emits for compatibility: one real book has 303 of
+/// `<a name="_Toc252778366" id="_Toc252778366">`. There the `name` says nothing
+/// the `id` does not, and dropping it loses nothing at all — every `#_Toc…`
+/// link goes on resolving through the id.
+///
+/// Three shapes, three answers:
+///
+/// * **`name` equals the `id`** — drop the `name`. Nothing is lost.
+/// * **no `id` at all** — rename the attribute to `id`. The anchor keeps its
+///   name, its position and every link into it, and becomes legal.
+/// * **`name` differs from the `id`** — the element answers to two names and
+///   only one can survive. If anything links to the `name`, that is reported
+///   rather than guessed at; if nothing does, the dead `name` goes.
+pub struct AnchorNames;
+
+impl Fixer for AnchorNames {
+    fn name(&self) -> &'static str {
+        "anchor-names"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "replace the removed name attribute on an <a> with the id it stands for"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        // HTML5 accepts `name` on an anchor, so under EPUB 3 there is nothing
+        // to repair and the edit would be noise on a valid book.
+        if book.epub_version() >= 3 {
+            return Outcome::none();
+        }
+        let mut outcome = Outcome::none();
+        let index = book.reference_index();
+        let (mut dropped, mut promoted) = (0u32, 0u32);
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for node in nodes.iter().filter(|n| n.name == "a" && n.kind != NodeKind::End) {
+                let Some(name) = node.attr("name") else {
+                    continue;
+                };
+                match node.attr("id") {
+                    Some(id) if id.value == name.value => {
+                        edits.delete(name.span_with_space.clone());
+                        dropped += 1;
+                    }
+                    Some(_) => {
+                        if index.is_referenced(&doc, &name.value) {
+                            outcome.push_finding(format!(
+                                "{}: <a name=\"{}\"> is not allowed under EPUB 2 and the element \
+                                 already has a different id, but something links to the name, so \
+                                 one of the two targets has to be chosen by hand",
+                                basename(&doc),
+                                name.value
+                            ));
+                        } else {
+                            edits.delete(name.span_with_space.clone());
+                            dropped += 1;
+                        }
+                    }
+                    None => {
+                        edits.replace(name.span.clone(), format!("id=\"{}\"", name.value));
+                        promoted += 1;
+                    }
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if dropped > 0 {
+            outcome.push_change(format!(
+                "removed {dropped} <a name> attribute(s) the id already stood for"
+            ));
+        }
+        if promoted > 0 {
+            outcome.push_change(format!("turned {promoted} <a name> into the id it meant"));
+        }
+        outcome
+    }
+}
+
+/// RSC-005: `value of attribute "X" is invalid; must be equal to …`.
+///
+/// XHTML 1.1 declares a handful of attributes as enumerations, and the DTD
+/// spells every keyword in lower case, so `dir="LTR"` and `valign="TOP"` are
+/// errors — not because the value is wrong but because its *case* is. One real
+/// book has `dir="LTR"` on all 95 of its documents.
+///
+/// HTML5 matches enumerated values ASCII-case-insensitively, so this is EPUB 2
+/// only; under EPUB 3 the same markup is clean and the edit would be noise.
+///
+/// The repair fires only when the value already *is* one of the keywords apart
+/// from case. A `dir="sideways"` is a different defect — a value that means
+/// nothing — and lower-casing it would dress up the error rather than fix it,
+/// so it is left for the report.
+pub struct KeywordCase;
+
+/// `attribute -> the keywords it accepts`, as the XHTML 1.1 DTD spells them.
+const KEYWORDS: &[(&str, &[&str])] = &[
+    ("dir", &["ltr", "rtl"]),
+    ("valign", &["top", "middle", "bottom", "baseline"]),
+    ("align", &["left", "center", "right", "justify", "char"]),
+    ("clear", &["left", "all", "right", "none"]),
+    ("shape", &["rect", "circle", "poly", "default"]),
+    ("scope", &["row", "col", "rowgroup", "colgroup"]),
+    ("rules", &["none", "groups", "rows", "cols", "all"]),
+    (
+        "frame",
+        &[
+            "void", "above", "below", "hsides", "lhs", "rhs", "vsides", "box", "border",
+        ],
+    ),
+    ("method", &["get", "post"]),
+];
+
+impl Fixer for KeywordCase {
+    fn name(&self) -> &'static str {
+        "keyword-case"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "lower-case an enumerated attribute value that XHTML 1.1 spells in lower case"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        if book.epub_version() >= 3 {
+            return Outcome::none();
+        }
+        let mut counts: Vec<(&str, u32)> = Vec::new();
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for node in nodes.iter().filter(|n| n.kind != NodeKind::End) {
+                for attr in &node.attrs {
+                    let Some((name, keywords)) =
+                        KEYWORDS.iter().find(|(n, _)| *n == attr.name)
+                    else {
+                        continue;
+                    };
+                    let lower = attr.value.to_ascii_lowercase();
+                    // Already right, or not a keyword at all: not ours.
+                    if lower == attr.value || !keywords.contains(&lower.as_str()) {
+                        continue;
+                    }
+                    edits.replace(attr.span.clone(), format!("{}=\"{lower}\"", attr.name));
+                    match counts.iter_mut().find(|(n, _)| n == name) {
+                        Some(slot) => slot.1 += 1,
+                        None => counts.push((name, 1)),
+                    }
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if counts.is_empty() {
+            return Outcome::none();
+        }
+        let total: u32 = counts.iter().map(|(_, c)| c).sum();
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        Outcome::change(format!(
+            "lower-cased {total} enumerated attribute value(s) [{}]",
+            counts
+                .iter()
+                .map(|(n, c)| format!("{n}x{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_invalid_data_name;

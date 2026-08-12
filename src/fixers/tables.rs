@@ -45,11 +45,21 @@ pub enum Presentation {
 
 /// Attributes HTML5 removed, by element.
 const HTML5: &[(&[&str], &[&str])] = &[
+    // Not a table, but the same defect and the same repair: the presentational
+    // attributes an early-2000s converter puts on <body>. Measured, these are
+    // errors under *both* rulesets, unlike everything else here — one real book
+    // carries `<body text="#000000" link="#0000ff">` in all 95 of its
+    // documents, which is 190 errors from one habit.
+    (
+        &["body"],
+        &["text", "link", "alink", "vlink", "bgcolor", "background"],
+    ),
     (
         &["table"],
         &[
             "align",
             "bgcolor",
+            "bordercolor",
             "cellpadding",
             "cellspacing",
             "frame",
@@ -81,7 +91,16 @@ const HTML5: &[(&[&str], &[&str])] = &[
 /// EPUB 2 book. Everything omitted here is legal in EPUB 2 and is left alone:
 /// removing it would change rendering for no validation benefit.
 const XHTML11: &[(&[&str], &[&str])] = &[
-    (&["table"], &["align", "bgcolor", "valign"]),
+    // Not a table, but the same defect and the same repair: the presentational
+    // attributes an early-2000s converter puts on <body>. Measured, these are
+    // errors under *both* rulesets, unlike everything else here — one real book
+    // carries `<body text="#000000" link="#0000ff">` in all 95 of its
+    // documents, which is 190 errors from one habit.
+    (
+        &["body"],
+        &["text", "link", "alink", "vlink", "bgcolor", "background"],
+    ),
+    (&["table"], &["align", "bgcolor", "bordercolor", "valign"]),
     (
         &["thead", "tbody", "tfoot", "tr", "col", "colgroup"],
         &["bgcolor"],
@@ -185,7 +204,7 @@ fn merge_style(edits: &mut Edits, node: &Node, declarations: &[String]) {
 }
 
 /// Every stylesheet in the book, folded into one index.
-fn author_styles(book: &Book) -> Stylesheet {
+pub(crate) fn author_styles(book: &Book) -> Stylesheet {
     let mut sheet = Stylesheet::default();
     for name in book.names() {
         if ends_with_any(name, &[".css"])
