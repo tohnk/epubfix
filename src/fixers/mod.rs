@@ -147,6 +147,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(legacy_html::ImgAlt),
         Box::new(nesting::NestedAnchors),
         Box::new(nesting::MisplacedBlockquotes),
+        Box::new(nesting::InlineInBlock),
         Box::new(anchors::MisplacedAnchors),
         // Before dangling-resources, which can recover a link this would only
         // delete.

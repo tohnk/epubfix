@@ -372,3 +372,122 @@ impl Fixer for MisplacedBlockquotes {
         outcome
     }
 }
+
+/// RSC-005: inline content directly inside a `<blockquote>`, when there is not
+/// much of it.
+///
+/// XHTML 1.1 gives `<blockquote>` a block-only content model and HTML5 gives it
+/// flow, so verse written as bare text and `<br/>` is an error under EPUB 2 and
+/// clean under EPUB 3. Thousands of them across hundreds of files is a book
+/// whose *declaration* is wrong, and the retagger moves the declaration rather
+/// than rewrite a third of the book. A dozen of them is not evidence of
+/// anything: it is a dozen paragraphs, and wrapping each run in a `<div>` is a
+/// far smaller change than converting the book.
+///
+/// So this covers exactly the case the diagnostic used to hand back with "wrap
+/// them in a `<div>` by hand". Above the threshold it does nothing, because by
+/// then the book has already been retagged and is EPUB 3.
+///
+/// The `<div>` is the neutral container — no margins of its own — and it goes
+/// around each *run* of inline content between the block children, so a
+/// blockquote holding a `<p>` and some loose verse keeps both in order.
+///
+/// Measured: `<blockquote>bare verse<br/>more</blockquote>` is 4 errors, and
+/// the same content inside a `<div>` is 0. Only the containers where that holds
+/// are touched — see [`crate::version::WRAPPABLE`].
+pub struct InlineInBlock;
+
+impl Fixer for InlineInBlock {
+    fn name(&self) -> &'static str {
+        "inline-in-block"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "wrap a short run of inline content in a <div> where XHTML 1.1 wants a block"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        if book.epub_version() >= 3 {
+            return Outcome::none();
+        }
+        // Only the handful case. A book past the threshold has been retagged
+        // already, or was told not to be, and rewriting it wholesale is the
+        // change this tool exists to avoid.
+        if !crate::version::few_enough_to_wrap(crate::version::assess(book).inline_in_block) {
+            return Outcome::none();
+        }
+        let mut wrapped = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for (i, node) in nodes.iter().enumerate() {
+                if node.kind != NodeKind::Start
+                    || !crate::version::WRAPPABLE.contains(&node.name.as_str())
+                {
+                    continue;
+                }
+                let Some(close) = node.close else { continue };
+
+                // Everything this element holds that is *not* an inline child:
+                // those are already legal here, and the gaps between them are
+                // the runs that are not.
+                let mut blocks: Vec<std::ops::Range<usize>> = nodes
+                    .iter()
+                    .filter(|c| {
+                        c.parent == Some(i)
+                            && c.kind != NodeKind::End
+                            && !crate::version::INLINE.contains(&c.name.as_str())
+                    })
+                    .map(|c| c.element_span(&nodes))
+                    .collect();
+                blocks.sort_by_key(|r| r.start);
+
+                let mut cursor = node.span.end;
+                let end = nodes[close].span.start;
+                let mut gaps: Vec<std::ops::Range<usize>> = Vec::new();
+                for b in &blocks {
+                    if b.start > cursor {
+                        gaps.push(cursor..b.start);
+                    }
+                    cursor = cursor.max(b.end);
+                }
+                if end > cursor {
+                    gaps.push(cursor..end);
+                }
+
+                for gap in gaps {
+                    let raw = &text[gap.clone()];
+                    if raw.trim().is_empty() {
+                        continue;
+                    }
+                    // Wrap the content, not the whitespace around it, so the
+                    // file's own layout is left as it was.
+                    let lead = raw.len() - raw.trim_start().len();
+                    let trail = raw.len() - raw.trim_end().len();
+                    edits.insert(gap.start + lead, "<div>".to_string());
+                    edits.insert(gap.end - trail, "</div>".to_string());
+                    wrapped += 1;
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if wrapped == 0 {
+            return Outcome::none();
+        }
+        Outcome::change(format!(
+            "wrapped {wrapped} run(s) of inline content in a <div>, which is what XHTML 1.1 \
+             wants there"
+        ))
+    }
+}

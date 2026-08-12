@@ -43,7 +43,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `anchor-names` | RSC-005 | replaces the `name` attribute XHTML 1.1 removed from `<a>` with the `id` it stood for |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names — in content documents and the NCX — and every fragment pointing at them |
-| `duplicate-ids` | RSC-005 | makes duplicated ids unique in content documents and the NCX alike, keeping the first and leaving referenced ones alone |
+| `duplicate-ids` | RSC-005 | makes duplicated ids unique in content documents and the NCX alike, keeping the first — which is the one every link already resolves to |
 | `data-attributes` | HTM_061 | removes custom data attributes whose names HTML5 rejects (Kindle's `data-AmznRemoved`) |
 | `keyword-case` | RSC-005 | lower-cases an enumerated attribute value (`dir="LTR"`, `valign="TOP"`) that XHTML 1.1 spells in lower case |
 | `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
@@ -51,10 +51,11 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `img-alt` | RSC-005 | adds `alt=""` to decorative images in EPUB 2, and reports the rest rather than inventing captions |
 | `nested-anchors` | RSC-005 | unwraps an `<a>` nested inside another, keeping its text and rehoming any id on a `<span>` |
 | `misplaced-blockquotes` | RSC-005 | splits a paragraph around a `<blockquote>` it swallowed, or demotes the quotation to a `<span>` |
+| `inline-in-block` | RSC-005 | wraps a short run of inline content in a `<div>` where XHTML 1.1 wants a block, instead of retagging the book |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
 | `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
 | `orphan-links` | RSC-007 | repoints a link whose anchor was discarded at the heading its own text names |
-| `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead stylesheet/script includes, and an `<img>` whose file is proven absent — never an `<a>` |
+| `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead `<link>`/`<script>` includes, and an `<img>` whose file is proven absent — never an `<a>` |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
 | `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |

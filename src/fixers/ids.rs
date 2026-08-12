@@ -23,7 +23,7 @@ use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
 use crate::markup::{Edits, id_attrs, scan};
 use crate::refs::resolve_href;
-use crate::util::{basename, is_bad_id, re, sanitise_id};
+use crate::util::{is_bad_id, re, sanitise_id};
 
 /// An `href`/`src` attribute value, captured so its span can be edited.
 static HREF_RE: LazyLock<Regex> =
@@ -179,11 +179,13 @@ impl Fixer for XmlIds {
 /// candidate replacement is checked against the document's whole id set rather
 /// than a running prefix of it.
 ///
-/// One extra worry applies to content documents, where an id is very often a
-/// live link target: a duplicate that something references is reported rather
-/// than renamed. That leaves an error behind on purpose. A book where two
-/// referenced elements share an id has already lost the information about which
-/// link meant which, and no amount of renaming recovers it.
+/// This used to stop short of a duplicate something linked to, on the grounds
+/// that renaming it might break the link. It cannot. A fragment resolves to the
+/// **first** element with that id in tree order, so every link already lands on
+/// the first occurrence and renaming any later one cannot change where a single
+/// link goes. Nothing can be deliberately pointing at the second, either — it is
+/// unreachable by definition. Measured: two `id="ch"` with an `<a href="#ch">`
+/// is 2 errors, and renaming only the second is 0.
 pub struct DuplicateIds;
 
 impl Fixer for DuplicateIds {
@@ -199,7 +201,6 @@ impl Fixer for DuplicateIds {
 
     fn apply(&self, book: &mut Book) -> Outcome {
         let mut outcome = Outcome::none();
-        let index = book.reference_index();
         let mut renamed = 0u32;
 
         // Every file where an id has to be unique. The NCX is XML with ids in
@@ -243,15 +244,6 @@ impl Fixer for DuplicateIds {
                 // The first one keeps the name, so every link that resolves
                 // today still resolves to the same element afterwards.
                 if seen.insert(attr.value.clone()) {
-                    continue;
-                }
-                if index.is_referenced(&doc, &attr.value) {
-                    outcome.push_finding(format!(
-                        "{}: id \"{}\" appears more than once and something links to it, so \
-                         the duplicate was left alone",
-                        basename(&doc),
-                        attr.value
-                    ));
                     continue;
                 }
                 let new = unique_id(&attr.value, &taken);

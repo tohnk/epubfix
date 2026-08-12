@@ -24,11 +24,19 @@ fn is_reference(attr: &Attr) -> bool {
 
 /// The elements whose entire purpose is to pull in a resource, and which can
 /// therefore be deleted when that resource does not exist.
+///
+/// Any `<link>` counts, not only a stylesheet one. `<link>` is a void element:
+/// it has no content, and everything it does it does through its `href`, so one
+/// whose target is proven absent does nothing at all. Requiring
+/// `rel="stylesheet"` sent a Gutenberg *Dracula*'s fourteen
+/// `<link rel="coverpage">` elements down the branch for things that carry
+/// content, which reported them as "left alone because it carries content" —
+/// true of an `<a>` and not of a `<link>`. Measured: a dead
+/// `<link rel="coverpage">` and no link at all both validate clean, so removing
+/// it is the repair and not merely a silencing.
 fn is_pure_include(node: &Node) -> bool {
     match node.name.as_str() {
-        "link" => node
-            .attr("rel")
-            .is_some_and(|r| r.value.to_ascii_lowercase().contains("stylesheet")),
+        "link" => node.attr("href").is_some(),
         "script" => node.attr("src").is_some(),
         _ => false,
     }
@@ -217,7 +225,7 @@ impl Fixer for DanglingResources {
         }
         if dropped > 0 {
             outcome.push_change(format!(
-                "removed {dropped} stylesheet/script include(s) with no file behind them"
+                "removed {dropped} dead resource include(s) — <link>/<script> with no file behind them"
             ));
         }
         outcome

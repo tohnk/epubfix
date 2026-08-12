@@ -60,22 +60,34 @@ fn keep_version_suppresses_retagging_entirely() {
 }
 
 #[test]
-fn a_few_stray_inline_runs_are_reported_rather_than_retagging_the_book() {
+fn a_few_stray_inline_runs_are_wrapped_rather_than_retagging_the_book() {
     // One or two of these mean a couple of paragraphs need a <div>, not that
     // the whole book is the wrong format. Changing a book's format identity on
-    // that evidence would be wildly out of proportion.
+    // that evidence would be wildly out of proportion — and so would handing it
+    // back to be wrapped by hand, which is what this used to do.
     let (outcome, after) = roundtrip_full(&epub2(VERSE, "<p>x</p>"));
+    let doc = entry(&after, "OEBPS/ch1.xhtml");
 
     assert!(
         entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#),
         "must not retag on weak evidence"
     );
-    let finding = outcome
-        .findings
-        .iter()
-        .find(|f| f.contains("too few to retag"))
-        .unwrap_or_else(|| panic!("expected a report, got {:?}", outcome.findings));
-    assert!(finding.contains("--migrate-epub3"), "{finding}");
+    assert!(doc.contains("<blockquote>"), "the quotation stays: {doc}");
+    assert!(doc.contains("<div>"), "and its verse gets a block container: {doc}");
+    assert!(
+        doc.contains("secret ministry") && doc.contains("owlet"),
+        "every word survives: {doc}"
+    );
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("inline content")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        !outcome.findings.iter().any(|f| f.contains("too few to retag")),
+        "there is nothing left to hand back: {:?}",
+        outcome.findings
+    );
 }
 
 #[test]
@@ -362,24 +374,17 @@ fn migration_unblocks_the_table_fixer() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_epub2_book_with_html5_only_markup_is_reported_not_rewritten() {
+fn an_epub2_book_with_html5_only_markup_keeps_its_declaration() {
+    // The declaration is the thing that must not move on this evidence. What
+    // *does* move is the markup, by the smallest edit that makes it legal where
+    // it stands: a <div> around the run, and the book is still EPUB 2.
     let before = epub2(VERSE, "<p>x</p>");
-    let (outcome, after) = roundtrip_full(&before);
+    let (_, after) = roundtrip_full(&before);
+    let doc = entry(&after, "OEBPS/ch1.xhtml");
 
-    let finding = outcome
-        .findings
-        .iter()
-        .find(|f| f.contains("only validates under EPUB 3"))
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a version-mismatch finding, got {:?}",
-                outcome.findings
-            )
-        });
-    assert!(finding.contains("--migrate-epub3"), "{finding}");
-    // Diagnosis only: the verse itself must be untouched.
-    assert!(entry(&after, "OEBPS/ch1.xhtml").contains("<blockquote>"));
-    assert!(!entry(&after, "OEBPS/ch1.xhtml").contains("<div>"));
+    assert!(entry(&after, "OEBPS/content.opf").contains(r#"version="2.0""#));
+    assert!(doc.contains("<blockquote>"), "{doc}");
+    assert!(doc.contains("<div>"), "{doc}");
 }
 
 #[test]

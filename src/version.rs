@@ -89,8 +89,18 @@ const EPUB2_ILLEGAL: &[&str] = &[
 /// content model is flow.
 const BLOCK_ONLY: &[&str] = &["blockquote", "body", "form", "noscript", "fieldset"];
 
+/// The subset of [`BLOCK_ONLY`] a `<div>` can actually rescue.
+///
+/// Measured, under EPUB 2. A `<blockquote>` holding bare verse is 4 errors and
+/// `<blockquote><div>…</div></blockquote>` is 0. A `<form>` or `<fieldset>`
+/// holding the same content reports the *container* as not allowed and wrapping
+/// its children changes nothing — 3 errors either way — so those stay a report.
+/// `<body>` is not here because a body with no block content at all is
+/// [`crate::fixers::documents::FragmentDocuments`]' job and it gets there first.
+pub(crate) const WRAPPABLE: &[&str] = &["blockquote", "noscript"];
+
 /// Elements that are inline in XHTML 1.1, so illegal as a direct child above.
-const INLINE: &[&str] = &[
+pub(crate) const INLINE: &[&str] = &[
     "a", "abbr", "acronym", "b", "bdo", "big", "br", "button", "cite", "code", "dfn", "em", "font",
     "i", "img", "input", "kbd", "label", "map", "object", "q", "s", "samp", "select", "small",
     "span", "strike", "strong", "sub", "sup", "textarea", "tt", "u", "var",
@@ -109,6 +119,16 @@ static NAMED_ENTITY_RE: LazyLock<Regex> = LazyLock::new(|| re(r"&([A-Za-z][A-Za-
 /// reported rather than retagged, and `--migrate-epub3` is there for anyone who
 /// disagrees.
 const INLINE_IN_BLOCK_THRESHOLD: u32 = 20;
+
+/// Is this book's inline-in-block count small enough to repair in place?
+///
+/// Above the line the answer is to move the declaration, which the retagger has
+/// already done by the time any fixer runs; below it, wrapping a handful of
+/// runs in a `<div>` is the smaller change and the message used to ask the
+/// reader to do it by hand.
+pub fn few_enough_to_wrap(count: u32) -> bool {
+    count > 0 && count < INLINE_IN_BLOCK_THRESHOLD
+}
 
 /// What the book's own contents say about which version it is.
 #[derive(Debug, Default)]

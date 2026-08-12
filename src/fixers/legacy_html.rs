@@ -135,10 +135,12 @@ impl Fixer for VersionMismatch {
         let assessment = crate::version::assess(book);
         if assessment.suggestive_only() {
             outcome.push_finding(format!(
-                "declares EPUB 2, but {} element(s) hold inline content that only validates \
-                 under EPUB 3 rules (verse in <blockquote>, typically). That is too few to \
-                 retag the whole book on, so nothing was changed; wrap them in a <div> by \
-                 hand, or use --migrate-epub3 to change the declaration instead.",
+                "declares EPUB 2, but {} element(s) still hold inline content that only \
+                 validates under EPUB 3 rules. A short run inside a <blockquote> is wrapped in \
+                 a <div> automatically and these are what is left: either too many to repair \
+                 without rewriting the book, or inside a <form> or <fieldset>, where measuring \
+                 shows a wrapper does not help. Use --migrate-epub3 to move the declaration \
+                 instead.",
                 assessment.inline_in_block
             ));
         } else if !assessment.epub3_only.is_empty() {

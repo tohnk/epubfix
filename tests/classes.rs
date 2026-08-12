@@ -74,6 +74,10 @@ fn fix(before: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
     (outcome, after)
 }
 
+fn ch1_of(after: &[(String, Vec<u8>)]) -> String {
+    entry(after, "OEBPS/ch1.xhtml")
+}
+
 fn ch1(after: &[(String, Vec<u8>)]) -> String {
     entry(after, "OEBPS/ch1.xhtml")
 }
@@ -103,25 +107,30 @@ fn an_unreferenced_duplicate_id_is_renamed_and_the_first_one_is_not() {
 }
 
 #[test]
-fn a_referenced_duplicate_id_is_reported_rather_than_renamed() {
+fn a_referenced_duplicate_id_is_renamed_after_the_first() {
+    // This used to stop at a duplicate something linked to, for fear of
+    // breaking the link. It cannot: a fragment resolves to the *first* element
+    // with that id in tree order, so `#dup` already lands on the first and
+    // renaming the second cannot move it. Nothing can be pointing at the second
+    // either -- it is unreachable by definition. Measured: two `id="dup"` with
+    // an `<a href="#dup">` is 2 errors, and renaming only the second is 0.
     let (outcome, after) = fix(&book2(
         r##"<p id="dup">a</p><p id="dup">b</p><p><a href="#dup">link</a></p>"##,
     ));
+    let got = ch1(&after);
 
     assert!(
-        outcome.changes.is_empty(),
-        "nothing may move: {:?}",
+        outcome.changes.iter().any(|c| c.contains("duplicated id")),
+        "got {:?}",
         outcome.changes
     );
+    assert_eq!(got.matches(r#"id="dup""#).count(), 1, "got {got}");
+    assert!(got.contains(r#"id="dup_2""#), "got {got}");
     assert!(
-        outcome
-            .findings
-            .iter()
-            .any(|f| f.contains("dup") && f.contains("links to it")),
-        "got {:?}",
-        outcome.findings
+        got.contains(r##"href="#dup""##),
+        "the link is untouched and still lands on the first: {got}"
     );
-    assert_eq!(ch1(&after).matches(r#"id="dup""#).count(), 2);
+    assert!(outcome.findings.is_empty(), "got {:?}", outcome.findings);
 }
 
 // ---------------------------------------------------------------------------
@@ -691,9 +700,6 @@ fn a_link_whose_directory_differs_only_in_case_is_repointed() {
     );
 }
 
-fn ch1_of(after: &[(String, Vec<u8>)]) -> String {
-    entry(after, "OEBPS/ch1.xhtml")
-}
 
 // ---------------------------------------------------------------------------
 // Manifest properties are computed from final state (§5j)
@@ -717,7 +723,7 @@ fn a_property_is_not_declared_for_a_construct_a_later_fixer_removes() {
         outcome
             .changes
             .iter()
-            .any(|c| c.contains("removed 1 stylesheet/script")),
+            .any(|c| c.contains("removed 1 dead resource include")),
         "got {:?}",
         outcome.changes
     );
@@ -2659,6 +2665,115 @@ fn ncx_ids_that_are_not_xml_names_are_sanitised() {
     assert!(
         outcome.changes.iter().any(|c| c.contains("sanitised")),
         "got {:?}",
+        outcome.changes
+    );
+}
+
+/// A `<link>` is a void element: everything it does, it does through its
+/// `href`. One whose target is proven absent does nothing, whatever its `rel`
+/// says — a Gutenberg *Dracula* has fourteen `<link rel="coverpage">` and they
+/// used to be reported as "left alone because it carries content", which is
+/// true of an `<a>` and not of these.
+#[test]
+fn a_dead_link_is_removed_whatever_its_rel_says() {
+    let page = doc("<p>text</p>").replace(
+        "</head>",
+        r#"<link rel="coverpage" href="images/cover.jpg"/></head>"#,
+    );
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", page.as_bytes()),
+    ]));
+
+    assert!(!ch1(&after).contains("coverpage"), "{}", ch1(&after));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("resource include")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        !outcome.findings.iter().any(|f| f.contains("carries content")),
+        "a <link> carries nothing: {:?}",
+        outcome.findings
+    );
+}
+
+/// An `<a>` still does carry content, so the wording that was wrong for a
+/// `<link>` is right here.
+#[test]
+fn a_dead_hyperlink_is_still_described_as_carrying_content() {
+    let (outcome, _) = fix(&book2(r#"<p><a href="gone.xhtml">chapter</a></p>"#));
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("carries content")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+
+/// A short run of verse gets the block container XHTML 1.1 wants, rather than
+/// being handed back to be wrapped by hand.
+#[test]
+fn a_short_run_of_inline_content_in_a_blockquote_is_wrapped() {
+    let (outcome, after) = fix(&book2(
+        "<blockquote>bare verse<br/>second line</blockquote>",
+    ));
+    let got = ch1(&after);
+
+    assert!(
+        got.contains("<blockquote><div>bare verse<br/>second line</div></blockquote>"),
+        "got {got}"
+    );
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("run(s) of inline content")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// Only the runs that need it: a quotation already holding a block keeps its
+/// shape, and a loose run beside it is wrapped on its own.
+#[test]
+fn each_run_is_wrapped_separately_and_blocks_are_left_where_they_are() {
+    let (_, after) = fix(&book2(
+        "<blockquote><p>proper</p>loose verse<p>also proper</p></blockquote>",
+    ));
+    let got = ch1(&after);
+    assert!(got.contains("<p>proper</p><div>loose verse</div><p>also proper</p>"), "got {got}");
+}
+
+/// A blockquote that was already correct must come out untouched.
+#[test]
+fn a_blockquote_that_is_already_block_only_is_not_wrapped() {
+    let raw = doc("<blockquote><div>bare verse</div></blockquote>");
+    let (outcome, after) = fix(&book_raw(&raw));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert_eq!(ch1(&after), raw);
+}
+
+/// Above the threshold the book has been retagged and declares EPUB 3, so the
+/// wrapping must not also fire and rewrite a third of the markup.
+#[test]
+fn a_book_past_the_threshold_is_retagged_rather_than_wrapped() {
+    let verse = "<blockquote>verse<br/>more</blockquote>".repeat(12);
+    let (outcome, after) = fix(&book2(&verse));
+
+    assert!(
+        opf_of(&after).contains(r#"version="3.0""#),
+        "got {}",
+        opf_of(&after)
+    );
+    assert!(
+        !outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("run(s) of inline content")),
+        "the declaration moved instead of the markup: {:?}",
         outcome.changes
     );
 }
