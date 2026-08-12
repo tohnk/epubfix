@@ -218,6 +218,20 @@ impl Book {
         }
     }
 
+    /// What the OCF `mimetype` entry looks like in the archive as it arrived:
+    /// `(is it first, is it stored uncompressed, are its bytes exactly right)`.
+    ///
+    /// [`Book::save`] always writes a correct one, so this exists only so a
+    /// fixer can notice that it *needed* writing. Without that the book is
+    /// never rewritten and the repair never reaches disk.
+    pub fn mimetype_state(&self) -> (bool, bool, bool) {
+        let first = self.entries.first().is_some_and(|e| e.name == "mimetype");
+        let entry = self.entries.iter().find(|e| e.name == "mimetype");
+        let stored = entry.is_some_and(|e| e.compression == CompressionMethod::Stored);
+        let exact = entry.is_some_and(|e| e.data == b"application/epub+zip");
+        (first, stored, exact)
+    }
+
     /// Entry names in archive order.
     pub fn names(&self) -> &[String] {
         &self.order

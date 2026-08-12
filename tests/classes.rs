@@ -2052,3 +2052,118 @@ fn a_self_closing_nested_anchor_with_no_id_leaves_nothing() {
     assert!(got.contains("Stoicism"), "got {got}");
     assert!(epubfix::markup::well_formed(&got).is_ok(), "got {got}");
 }
+
+// ---------------------------------------------------------------------------
+// duplicate-ids: one algorithm, both files
+// ---------------------------------------------------------------------------
+
+/// A replacement name must be checked against every id in the document, not
+/// just the ones seen so far.
+///
+/// This was two fixers with one algorithm between them, and the NCX copy had
+/// drifted: on `np`, `np`, `np_2` it renamed the duplicate onto the innocent
+/// `np_2`, then renamed *that* to `np_2_2` to resolve the collision it had
+/// just created. Two elements changed where one was wrong.
+#[test]
+fn a_rename_skips_past_a_name_that_is_already_in_use() {
+    let ncx = r#"<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="urn:uuid:1234-5678"/></head>
+  <docTitle><text>Test</text></docTitle>
+  <navMap>
+    <navPoint id="np" playOrder="1"><navLabel><text>A</text></navLabel><content src="ch1.xhtml"/></navPoint>
+    <navPoint id="np" playOrder="2"><navLabel><text>B</text></navLabel><content src="ch1.xhtml#b"/></navPoint>
+    <navPoint id="np_2" playOrder="3"><navLabel><text>C</text></navLabel><content src="ch1.xhtml#c"/></navPoint>
+  </navMap>
+</ncx>"#;
+    let (_, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", ncx.as_bytes()),
+        (
+            "OEBPS/ch1.xhtml",
+            doc(r#"<p id="b">one</p><p id="c">two</p>"#).as_bytes(),
+        ),
+    ]));
+
+    let got = entry(&after, "OEBPS/toc.ncx");
+    let ids: Vec<&str> = got
+        .match_indices(r#"navPoint id=""#)
+        .map(|(i, m)| {
+            let rest = &got[i + m.len()..];
+            &rest[..rest.find('"').unwrap()]
+        })
+        .collect();
+    assert_eq!(ids, ["np", "np_3", "np_2"], "got {got}");
+}
+
+/// The same shape in a content document, which is where the correct
+/// implementation already lived.
+#[test]
+fn the_same_rule_holds_in_a_content_document() {
+    let (_, after) = fix(&book2(
+        r#"<p id="x">one</p><p id="x">two</p><p id="x_2">three</p>"#,
+    ));
+    let got = ch1(&after);
+    assert!(got.contains(r#"id="x_3""#), "got {got}");
+    assert!(got.contains(r#"id="x_2">three"#), "the innocent one stays: {got}");
+}
+
+// ---------------------------------------------------------------------------
+// mimetype
+// ---------------------------------------------------------------------------
+
+/// Build an archive with a deliberately wrong `mimetype` entry: last in the
+/// archive, deflated, and with a trailing newline.
+fn book_bad_mimetype() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = ZipWriter::new(&mut buf);
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, data) in [
+            ("META-INF/container.xml", CONTAINER.to_string()),
+            ("OEBPS/content.opf", opf("2.0", "", "", "")),
+            ("OEBPS/toc.ncx", NCX.to_string()),
+            ("OEBPS/ch1.xhtml", doc("<p>text</p>")),
+        ] {
+            w.start_file(name, deflated).unwrap();
+            w.write_all(data.as_bytes()).unwrap();
+        }
+        w.start_file("mimetype", deflated).unwrap();
+        w.write_all(b"application/epub+zip\n").unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// The repair lived in the archive writer all along; nothing reported it, so a
+/// book whose only defect was its mimetype entry drew "nothing to do" and was
+/// never rewritten.
+#[test]
+fn a_wrong_mimetype_entry_is_reported_so_the_book_is_rewritten() {
+    let (outcome, after) = roundtrip_full(&book_bad_mimetype());
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("mimetype")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert_eq!(after[0].0, "mimetype", "it must come first");
+    assert_eq!(after[0].1, b"application/epub+zip", "and hold exactly that");
+}
+
+/// It must be silent on every book that already has this right, which is
+/// almost all of them.
+#[test]
+fn a_correct_mimetype_entry_draws_no_comment() {
+    let (outcome, _) = fix(&book2("<p>text</p>"));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("mimetype")),
+        "got {:?}",
+        outcome.changes
+    );
+}

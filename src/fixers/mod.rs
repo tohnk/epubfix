@@ -116,6 +116,7 @@ pub trait Fixer {
 /// hrefs against names no longer in the archive.
 pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
     vec![
+        Box::new(opf::MimetypeEntry),
         Box::new(opf::PackageVersion),
         Box::new(opf::SpinePageMap),
         Box::new(opf::FontMediaType),
@@ -130,8 +131,8 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(attrs::XhtmlNamespace),
         Box::new(ids::XmlIds),
         // After xml-ids, so a sanitised id that collided with an existing one
-        // is seen as the duplicate it now is.
-        Box::new(ids::ContentDuplicateIds),
+        // is seen as the duplicate it now is. Covers the NCX too.
+        Box::new(ids::DuplicateIds),
         Box::new(attrs::DataAttributes),
         Box::new(tables::LegacyTableAttrs {
             mode: opts.presentation,
@@ -154,7 +155,6 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(resources::DeadSchemes),
         // Before the renumbering, which closes the gaps removal leaves behind.
         Box::new(ncx::DeadNavEntries),
-        Box::new(ncx::NcxDuplicateIds),
         Box::new(ncx::PageListAttrs),
         Box::new(filenames::UnsafeFilenames),
         Box::new(ncx::PlayOrder),

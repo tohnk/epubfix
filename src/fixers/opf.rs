@@ -434,3 +434,51 @@ fn line_indent(text: &str, at: usize) -> String {
         .take_while(|c| c.is_whitespace())
         .collect()
 }
+
+/// PKG-005, PKG-006, PKG-007: the OCF `mimetype` entry.
+///
+/// OCF requires the archive to open with an entry named `mimetype`, stored
+/// uncompressed, holding exactly `application/epub+zip` and nothing else — no
+/// trailing newline, no BOM, no ZIP extra field.
+///
+/// [`Book::save`] has always written exactly that, so any book this tool
+/// rewrites comes out correct. The gap was that nothing *noticed*: a book whose
+/// only defect was its mimetype entry drew "nothing to do", was never
+/// rewritten, and kept both errors. The repair existed and could not reach
+/// disk. So this fixer changes no bytes itself; it exists to report the
+/// condition, which is what causes the archive to be repacked.
+///
+/// Found by working down epubcheck's message catalogue rather than from a book,
+/// which is the argument for doing that: no book in the library has this defect,
+/// and one with it would have been quietly returned unrepaired.
+pub struct MimetypeEntry;
+
+impl Fixer for MimetypeEntry {
+    fn name(&self) -> &'static str {
+        "mimetype"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["PKG-005", "PKG-006", "PKG-007"]
+    }
+    fn description(&self) -> &'static str {
+        "put the OCF mimetype entry first, uncompressed, with exactly the required bytes"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let (first, stored, exact) = book.mimetype_state();
+        let mut wrong: Vec<&str> = Vec::new();
+        if !first {
+            wrong.push("was not the first entry");
+        }
+        if !stored {
+            wrong.push("was compressed");
+        }
+        if !exact {
+            wrong.push("did not hold exactly \"application/epub+zip\"");
+        }
+        if wrong.is_empty() {
+            return Outcome::none();
+        }
+        Outcome::change(format!("rewrote the mimetype entry, which {}", wrong.join(" and ")))
+    }
+}

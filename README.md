@@ -29,6 +29,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 
 | Fixer | epubcheck | What it does |
 | --- | --- | --- |
+| `mimetype` | PKG-005, PKG-006, PKG-007 | puts the OCF `mimetype` entry first, uncompressed, with exactly the required bytes |
 | `opf-version` | OPF-001 | `<package version="1.0">` (OEBPS 1.0) → `"2.0"` |
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
 | `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
@@ -38,7 +39,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `head-content` | RSC-005 | removes empty elements a `<head>` may not hold, and reports any carrying text |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names, and every `href`/`src` fragment pointing at them |
-| `content-duplicate-ids` | RSC-005 | makes duplicated ids in a content document unique, keeping the first and leaving referenced ones alone |
+| `duplicate-ids` | RSC-005 | makes duplicated ids unique in content documents and the NCX alike, keeping the first and leaving referenced ones alone |
 | `data-attributes` | HTM_061 | removes custom data attributes whose names HTML5 rejects (Kindle's `data-AmznRemoved`) |
 | `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
 | `img-alt` | RSC-005 | adds `alt=""` to decorative images in EPUB 2, and reports the rest rather than inventing captions |
@@ -52,7 +53,6 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
-| `ncx-duplicate-ids` | RSC-005 | makes duplicated NCX ids unique, leaving any that are referenced alone |
 | `ncx-pagelist-attrs` | RSC-005 | completes the co-required `id`/`class` pair on a `<pageList>` that carries only one |
 | `filenames` | PKG-009, PKG-010, RSC-020 | renames resources whose filenames a URL cannot address, and updates every reference, raw or percent-encoded |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |

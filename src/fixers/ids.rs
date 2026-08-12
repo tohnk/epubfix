@@ -154,27 +154,38 @@ impl Fixer for XmlIds {
 ///
 /// Kobo injects reading-location spans and does not check them against what is
 /// already there; one chapter of a real book had twelve copies of
-/// `id="kobo.40.N"`. [`crate::fixers::ncx::NcxDuplicateIds`] does the same job
-/// for the NCX, and this is the same logic pointed at the content documents,
-/// with one extra worry: in a content document an id is very often a live link
-/// target, and renaming the one somebody links to breaks the link.
+/// `id="kobo.40.N"`. The NCX has the same problem from a different tool — one
+/// *Hobbit* uses `id="chap-1"` on four separate `navPoint`s.
 ///
-/// So the *first* occurrence always keeps the name, and after that any
-/// duplicate that something references is reported rather than renamed. That
-/// leaves an error behind on purpose. A book where two referenced elements
-/// share an id has already lost the information about which link meant which,
-/// and no amount of renaming recovers it.
-pub struct ContentDuplicateIds;
+/// This used to be two fixers with one algorithm between them, and the copies
+/// had drifted. The NCX one checked each candidate name against the ids it had
+/// *seen so far* rather than every id in the document, so on `np`, `np`, `np_2`
+/// it renamed the duplicate onto the innocent `np_2` and then renamed that to
+/// `np_2_2` to resolve the collision it had just made. Two elements changed
+/// where one was wrong. Pointing the correct implementation at both files is
+/// the whole of the fix.
+///
+/// The rule: the *first* occurrence always keeps its name, so every link that
+/// resolves today still resolves to the same element afterwards, and every
+/// candidate replacement is checked against the document's whole id set rather
+/// than a running prefix of it.
+///
+/// One extra worry applies to content documents, where an id is very often a
+/// live link target: a duplicate that something references is reported rather
+/// than renamed. That leaves an error behind on purpose. A book where two
+/// referenced elements share an id has already lost the information about which
+/// link meant which, and no amount of renaming recovers it.
+pub struct DuplicateIds;
 
-impl Fixer for ContentDuplicateIds {
+impl Fixer for DuplicateIds {
     fn name(&self) -> &'static str {
-        "content-duplicate-ids"
+        "duplicate-ids"
     }
     fn codes(&self) -> &'static [&'static str] {
         &["RSC-005"]
     }
     fn description(&self) -> &'static str {
-        "make duplicated ids in a content document unique, leaving referenced ones alone"
+        "make duplicated ids unique, in content documents and the NCX alike"
     }
 
     fn apply(&self, book: &mut Book) -> Outcome {
@@ -182,7 +193,17 @@ impl Fixer for ContentDuplicateIds {
         let index = book.reference_index();
         let mut renamed = 0u32;
 
-        for doc in book.markup_names() {
+        // Every file where an id has to be unique. The NCX is XML with ids in
+        // it exactly like the rest, and there was never a reason for it to have
+        // its own copy of this.
+        let mut targets = book.markup_names();
+        if let Some(ncx) = book.ncx_name().map(str::to_owned)
+            && !targets.contains(&ncx)
+        {
+            targets.push(ncx);
+        }
+
+        for doc in targets {
             let Some(text) = book.text(&doc).map(str::to_owned) else {
                 continue;
             };
