@@ -89,6 +89,9 @@ pub struct Options {
     pub presentation: Presentation,
     /// When the tool may write a language it worked out for itself.
     pub language: LanguagePolicy,
+    /// Keep an `<img>` whose file is proven absent, reporting it instead of
+    /// removing it.
+    pub keep_missing_images: bool,
 }
 
 impl Default for Options {
@@ -101,6 +104,7 @@ impl Default for Options {
             keep_version: false,
             presentation: Presentation::Strip,
             language: LanguagePolicy::EnglishOnly,
+            keep_missing_images: false,
         }
     }
 }

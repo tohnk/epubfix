@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::markup::{Attr, Edits, Node, NodeKind, id_attrs, scan};
+use crate::markup::{Attr, Edits, Node, NodeKind, id_attrs, line_span, scan};
 use crate::paths::{Resolution, Resolver, relative_to};
 use crate::refs::resolve_href;
 use crate::util::{basename, ends_with_any};
@@ -45,9 +45,86 @@ fn is_pure_include(node: &Node) -> bool {
 /// * **The file is genuinely gone.** Calibre drops the Adobe page-template but
 ///   leaves 100 `<link>`s behind; Kobo leaves a `<script src="kobo.js">` with no
 ///   script. Those elements contribute nothing but the reference, so they go.
-///   An `<img>` or an `<a>` never does: those carry content or navigation, and
-///   their absence is a defect to report, not to paper over.
-pub struct DanglingResources;
+///
+/// An `<a>` still never goes: it carries navigation, and its absence is a
+/// defect to report rather than paper over. An `<img>` used to be treated the
+/// same way, which was too absolute — see [`DanglingResources::images`].
+pub struct DanglingResources {
+    /// Delete an `<img>` whose file is proven absent, rather than reporting it.
+    ///
+    /// The distinction that matters is not the element type but whether the
+    /// target might exist somewhere. [`Resolver`] runs five candidate
+    /// resolutions before returning [`Resolution::Missing`], so by that point
+    /// the file is not in the archive under any path, spelling or case. That is
+    /// a proven absence, not a suspicion.
+    ///
+    /// The choice is then between an element that renders as a broken-image
+    /// placeholder forever and no element at all, and the page is already not
+    /// showing what it should — which is why this is on by default rather than
+    /// opt-in as first specified. What it costs is the record that an image was
+    /// once meant to be there; the `.bak` beside the book keeps that, and every
+    /// removal is named in the report.
+    pub images: bool,
+}
+
+impl Default for DanglingResources {
+    fn default() -> Self {
+        DanglingResources { images: true }
+    }
+}
+
+/// The span to delete for a missing `<img>`: the image, or the wrapper it is
+/// alone inside.
+///
+/// In *The Hobbit* the `<img>` sits alone in `<p class="ct-2">`, and leaving an
+/// empty paragraph behind is untidy and can still take vertical space. So the
+/// parent goes too when the image was its only content — but only one level.
+/// Walking further up would take out a `<div>` holding other material.
+///
+/// Two guards, both measured. The wrapper stays if the body would be left with
+/// no block content, because `element "body" incomplete` is a worse error than
+/// the one being fixed; and `<body>` itself is never the wrapper.
+fn removable_span(nodes: &[Node], img: usize, src: &str) -> std::ops::Range<usize> {
+    let whole = nodes[img].element_span(nodes);
+    let Some(parent) = nodes[img].parent else {
+        return whole;
+    };
+    let alone = !nodes[parent].has_text
+        && !nodes.iter().enumerate().any(|(i, n)| {
+            i != img && n.parent == Some(parent) && matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+        });
+    if !alone || matches!(nodes[parent].name.as_str(), "body" | "html" | "head") {
+        return whole;
+    }
+    if empties_the_body(nodes, parent) {
+        return whole;
+    }
+    let _ = src;
+    nodes[parent].element_span(nodes)
+}
+
+/// Would removing `wrapper` leave the `<body>` with nothing a body may hold?
+///
+/// Only a direct child of the body can do that: any deeper wrapper leaves its
+/// own ancestor in place, and an empty `<div>` is valid where an empty `<body>`
+/// is not.
+fn empties_the_body(nodes: &[Node], wrapper: usize) -> bool {
+    let Some(body) = nodes
+        .iter()
+        .position(|n| n.name == "body" && n.kind == NodeKind::Start)
+    else {
+        return false;
+    };
+    if nodes[wrapper].parent != Some(body) {
+        return false;
+    }
+    !nodes.iter().enumerate().any(|(i, n)| {
+        i != wrapper
+            && n.parent == Some(body)
+            && n.kind != NodeKind::End
+            && crate::fixers::documents::is_block(&n.name)
+    })
+}
 
 impl Fixer for DanglingResources {
     fn name(&self) -> &'static str {
@@ -72,7 +149,7 @@ impl Fixer for DanglingResources {
             let Ok(nodes) = scan(&text) else { continue };
             let mut edits = Edits::new();
 
-            for node in &nodes {
+            for (index, node) in nodes.iter().enumerate() {
                 for attr in node.attrs.iter().filter(|a| is_reference(a)) {
                     let fragment = resolve_href(&doc, &attr.value).and_then(|(_, f)| f);
                     match resolver.resolve(&doc, &attr.value) {
@@ -98,6 +175,22 @@ impl Fixer for DanglingResources {
                             if is_pure_include(node) {
                                 edits.delete(node.element_span(&nodes));
                                 dropped += 1;
+                            } else if self.images && node.name == "img" {
+                                let span = removable_span(&nodes, index, &text);
+                                let wrapper = span != node.element_span(&nodes);
+                                edits.delete(line_span(&text, span));
+                                // A change rather than a finding, and named in
+                                // full: this is the one repair that removes
+                                // something a reader could have seen.
+                                outcome.push_change(format!(
+                                    "{}: removed <img> for missing \"{}\"{}{}",
+                                    basename(&doc),
+                                    attr.value,
+                                    node.attr("alt")
+                                        .filter(|a| !a.value.trim().is_empty())
+                                        .map_or(String::new(), |a| format!(" (\"{}\")", a.value)),
+                                    if wrapper { ", and its empty wrapper" } else { "" }
+                                ));
                             } else {
                                 outcome.push_finding(format!(
                                     "{}: <{}> points at \"{}\", which is not in the book and has \

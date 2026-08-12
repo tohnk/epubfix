@@ -119,6 +119,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(opf::PackageVersion),
         Box::new(opf::SpinePageMap),
         Box::new(opf::FontMediaType),
+        Box::new(opf::EmptyMetadata),
         Box::new(opf::DcLanguage {
             policy: opts.language,
         }),
@@ -141,7 +142,9 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         // Before dangling-resources, which can recover a link this would only
         // delete.
         Box::new(opf::GuideReferences),
-        Box::new(resources::DanglingResources),
+        Box::new(resources::DanglingResources {
+            images: !opts.keep_missing_images,
+        }),
         Box::new(css_paths::CssPaths),
         Box::new(resources::BrokenFragments),
         Box::new(resources::DeadSchemes),

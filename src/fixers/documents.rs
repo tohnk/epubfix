@@ -144,6 +144,15 @@ fn ncx_label(book: &Book, doc: &str) -> Option<String> {
     (!inner.is_empty()).then(|| inner.to_string())
 }
 
+/// Is this element one a `<body>` may hold directly?
+///
+/// Shared with the missing-image fixer, which must not remove a wrapper when
+/// doing so would leave the body with nothing in it — measured, that trades
+/// RSC-007 for `element "body" incomplete`.
+pub fn is_block(name: &str) -> bool {
+    BLOCK.contains(&name)
+}
+
 /// Does this body hold any block-level element at all?
 ///
 /// The question is deliberately "any", not "only". A chapter with five hundred
@@ -153,9 +162,9 @@ fn ncx_label(book: &Book, doc: &str) -> Option<String> {
 /// tool must not do. A body with no block content anywhere is a different
 /// animal: the whole document is one fragment, and one container fixes it.
 fn has_block_content(nodes: &[Node], body: usize) -> bool {
-    nodes.iter().any(|n| {
-        n.parent == Some(body) && n.kind != NodeKind::End && BLOCK.contains(&n.name.as_str())
-    })
+    nodes
+        .iter()
+        .any(|n| n.parent == Some(body) && n.kind != NodeKind::End && is_block(&n.name))
 }
 
 impl Fixer for FragmentDocuments {

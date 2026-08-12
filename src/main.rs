@@ -32,6 +32,9 @@ OPTIONS:
         --language-detect=MODE
                         when a missing <dc:language> may be written from
                         detected text: en-only (default), any, or off
+        --keep-missing-images
+                        report an <img> whose file is proven absent instead
+                        of removing it and its now-empty wrapper
         --only NAMES    run only these fixers (comma-separated, see --list)
     -l, --list          list the available fixers and exit
         --pause         wait for Enter before exiting
@@ -103,6 +106,7 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
             "-r" | "--recursive" => parsed.recursive = true,
             "--migrate-epub3" => parsed.opts.migrate_epub3 = true,
             "--keep-version" => parsed.opts.keep_version = true,
+            "--keep-missing-images" => parsed.opts.keep_missing_images = true,
             "--preserve-presentation" => {
                 parsed.opts.presentation = epubfix::Presentation::Preserve;
             }

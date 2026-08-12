@@ -7,7 +7,7 @@ use regex::Regex;
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
 use crate::language::{self, Policy};
-use crate::markup::{Edits, NodeKind, scan};
+use crate::markup::{Edits, NodeKind, line_span, scan};
 use crate::refs::resolve_href;
 use crate::util::{ends_with_any, re};
 
@@ -295,6 +295,119 @@ impl Fixer for DcLanguage {
             "added <dc:language>{}</dc:language> — {how}",
             found.language
         ))
+    }
+}
+
+/// The Dublin Core elements a package document must have, in both versions.
+///
+/// The spec that asked for this fixer named only `identifier` and `language`.
+/// Measured, `title` belongs here too:
+///
+/// ```text
+/// <dc:title/>  absent  EPUB 2  ERROR   element "metadata" incomplete
+/// <dc:title/>  empty   EPUB 2  WARNING title tag is empty
+/// <dc:title/>  empty   EPUB 3  ERROR   character content of element invalid
+/// ```
+///
+/// So deleting an empty one trades a warning for a hard error under EPUB 2 and
+/// one error for another under EPUB 3 — the section 5e mistake exactly.
+const REQUIRED_DC: &[&str] = &["identifier", "title", "language"];
+
+/// OPF-054: `Date value "" is not valid … zero-length string`.
+///
+/// A Harper Collins build of *The Hobbit* pads its metadata with empty elements:
+///
+/// ```xml
+/// <dc:date/>
+/// <dc:subject/>
+/// <dc:description/>
+/// <dc:rights/>
+/// ```
+///
+/// Only `dc:date` is reported, because it is the only one of the four with a
+/// value grammar to violate — the empty string is not a W3C date. The other
+/// three are legal and equally meaningless. An element asserting nothing is not
+/// information, so removing it cannot lose any.
+///
+/// The exception is [`REQUIRED_DC`], where the element must exist even when its
+/// content is useless. Those are reported instead: an empty `<dc:title/>` is a
+/// real defect, but it needs a title, not a deletion, and only a person knows
+/// what the title is.
+pub struct EmptyMetadata;
+
+impl Fixer for EmptyMetadata {
+    fn name(&self) -> &'static str {
+        "empty-metadata"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["OPF-054"]
+    }
+    fn description(&self) -> &'static str {
+        "remove <dc:*> metadata elements with no content, keeping the required ones"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+        // No prefix bound to Dublin Core means no `dc:*` elements to weigh up.
+        let Some(prefix) = dc_prefix(&text) else {
+            return Outcome::none();
+        };
+        let Some(metadata) = nodes
+            .iter()
+            .position(|n| n.name == "metadata" && n.kind == NodeKind::Start)
+        else {
+            return Outcome::none();
+        };
+
+        let mut outcome = Outcome::none();
+        let mut edits = Edits::new();
+        let mut removed: Vec<String> = Vec::new();
+
+        for node in nodes.iter().filter(|n| n.parent == Some(metadata)) {
+            let raw = &text[node.span.start + 1..node.name_end];
+            let Some(local) = raw.strip_prefix(&format!("{prefix}:")) else {
+                continue;
+            };
+            // A start tag with no matching end is malformed, not empty; saying
+            // otherwise would delete the element and everything after it.
+            let empty = match (node.kind, node.close) {
+                (NodeKind::Empty, _) => true,
+                (NodeKind::Start, Some(close)) => text[node.span.end..nodes[close].span.start]
+                    .trim()
+                    .is_empty(),
+                _ => false,
+            };
+            if !empty {
+                continue;
+            }
+            if REQUIRED_DC.contains(&local.to_ascii_lowercase().as_str()) {
+                outcome.push_finding(format!(
+                    "<{raw}> is empty, and both EPUB versions require it — deleting it would \
+                     trade one error for another, so it needs a real value"
+                ));
+                continue;
+            }
+            edits.delete(line_span(&text, node.element_span(&nodes)));
+            removed.push(raw.to_string());
+        }
+
+        if !removed.is_empty() {
+            book.set_text(&opf_name, edits.apply(&text));
+            outcome.push_change(format!(
+                "removed {} empty metadata element(s) [{}]",
+                removed.len(),
+                removed.join(", ")
+            ));
+        }
+        outcome
     }
 }
 

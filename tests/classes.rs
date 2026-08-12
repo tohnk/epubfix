@@ -1443,3 +1443,220 @@ fn an_ordinary_document_is_not_mistaken_for_a_fragment() {
     assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
     assert_eq!(ch1(&after), raw);
 }
+
+// ---------------------------------------------------------------------------
+// empty-metadata
+// ---------------------------------------------------------------------------
+
+/// An EPUB 2 book whose `<metadata>` carries `extra` verbatim.
+fn book_meta(extra: &str) -> Vec<u8> {
+    let opf = opf("2.0", "", "", "").replace(
+        "  </metadata>",
+        &format!("{extra}\n  </metadata>"),
+    );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+    ])
+}
+
+/// The Hobbit's metadata block: four empty elements, only one of them flagged.
+#[test]
+fn empty_dc_elements_are_removed() {
+    let (outcome, after) = fix(&book_meta(
+        "    <dc:date/>\n    <dc:subject/>\n    <dc:description/>\n    <dc:rights/>",
+    ));
+    let opf = opf_of(&after);
+
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("dc:date")),
+        "got {:?}",
+        outcome.changes
+    );
+    for gone in ["<dc:date", "<dc:subject", "<dc:description", "<dc:rights"] {
+        assert!(!opf.contains(gone), "{gone} survived: {opf}");
+    }
+}
+
+/// Four deletions in a row must not leave four blank lines behind.
+#[test]
+fn removing_metadata_takes_the_whole_line_with_it() {
+    let (_, after) = fix(&book_meta(
+        "    <dc:date/>\n    <dc:subject/>\n    <dc:description/>\n    <dc:rights/>",
+    ));
+    let opf = opf_of(&after);
+    let metadata = opf
+        .split_once("<metadata")
+        .and_then(|(_, r)| r.split_once("</metadata>"))
+        .map(|(m, _)| m)
+        .unwrap();
+    assert!(!metadata.contains("\n\n"), "blank lines left behind: {metadata}");
+}
+
+/// An element with content is information, however uninteresting.
+#[test]
+fn metadata_with_content_is_left_alone() {
+    let (outcome, after) = fix(&book_meta("    <dc:date>2011-09-29</dc:date>"));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert!(opf_of(&after).contains("<dc:date>2011-09-29</dc:date>"));
+}
+
+/// Measured: `<dc:title/>` empty is a warning under EPUB 2 and an error under
+/// EPUB 3, but `<dc:title>` *absent* is a hard `metadata incomplete` error in
+/// both. Deleting it trades one complaint for a worse one — the 5e mistake.
+#[test]
+fn an_empty_required_element_is_reported_rather_than_deleted() {
+    let (outcome, after) = fix(&book_meta("    <dc:title/>\n    <dc:date/>"));
+
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("dc:title") && f.contains("require")),
+        "got {:?}",
+        outcome.findings
+    );
+    assert!(
+        opf_of(&after).contains("<dc:title/>"),
+        "the title must survive: {}",
+        opf_of(&after)
+    );
+    assert!(
+        !opf_of(&after).contains("<dc:date"),
+        "the optional one still goes"
+    );
+}
+
+/// Only `dc:*` elements are in scope. A `<meta>` with no content is the
+/// package's business and often meaningful.
+#[test]
+fn empty_non_dc_metadata_is_not_touched() {
+    let (outcome, after) = fix(&book_meta(r#"    <meta name="cover" content=""/>"#));
+    assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
+    assert!(opf_of(&after).contains(r#"<meta name="cover" content=""/>"#));
+}
+
+// ---------------------------------------------------------------------------
+// dangling-resources: missing images
+// ---------------------------------------------------------------------------
+
+/// An EPUB 2 book whose chapter body is `body`, with one image that exists so
+/// the archive is not trivially empty of them.
+fn book_img(body: &str) -> Vec<u8> {
+    let opf = opf(
+        "2.0",
+        r#"    <item id="real" href="images/real.jpg" media-type="image/jpeg"/>"#,
+        "",
+        "",
+    );
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+        ("OEBPS/images/real.jpg", &[0xFF, 0xD8, 0xFF, 0xE0]),
+    ])
+}
+
+/// The Hobbit case: the image is alone in a `<p>`, and both go.
+#[test]
+fn a_proven_missing_image_and_its_empty_wrapper_are_removed() {
+    let (outcome, after) = fix(&book_img(
+        "<h1>About the Publisher</h1>\n\
+         <p class=\"ct-2\"><img alt=\"\" src=\"images/Art_logo.jpg\"/></p>\n\
+         <p>HarperCollins</p>",
+    ));
+    let got = ch1(&after);
+
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("Art_logo.jpg") && c.contains("wrapper")),
+        "the removal must be named in full: {:?}",
+        outcome.changes
+    );
+    assert!(!got.contains("Art_logo"), "got {got}");
+    assert!(!got.contains("ct-2"), "the empty wrapper goes too: {got}");
+    assert!(got.contains("<p>HarperCollins</p>"), "got {got}");
+    assert!(outcome.remaining.is_empty(), "got {:?}", outcome.remaining);
+}
+
+/// The wrapper is only removed when the image was its *only* content.
+#[test]
+fn a_wrapper_holding_other_content_survives_the_image() {
+    let (_, after) = fix(&book_img(
+        "<h1>Publisher</h1>\n<p class=\"ct-2\"><img alt=\"\" src=\"gone.jpg\"/> HarperCollins</p>",
+    ));
+    let got = ch1(&after);
+    assert!(!got.contains("gone.jpg"), "got {got}");
+    assert!(got.contains("HarperCollins"), "the text stays: {got}");
+    assert!(got.contains("ct-2"), "the wrapper stays: {got}");
+}
+
+/// Measured: emptying the `<body>` produces `element "body" incomplete`, which
+/// is a worse error than the RSC-007 being fixed. So the wrapper stays.
+#[test]
+fn the_wrapper_stays_when_removing_it_would_empty_the_body() {
+    let (outcome, after) = fix(&book_img(r#"<p class="ct-2"><img alt="" src="gone.jpg"/></p>"#));
+    let got = ch1(&after);
+
+    assert!(!got.contains("gone.jpg"), "the image still goes: {got}");
+    assert!(
+        got.contains(r#"<p class="ct-2">"#),
+        "the body must keep some block content: {got}"
+    );
+    assert!(outcome.remaining.is_empty(), "got {:?}", outcome.remaining);
+}
+
+/// Only one level. A `<div>` holding other material is not walked up into.
+#[test]
+fn removal_stops_at_the_immediate_wrapper() {
+    let (_, after) = fix(&book_img(
+        "<div class=\"keep\"><p><img alt=\"\" src=\"gone.jpg\"/></p><p>other</p></div>",
+    ));
+    let got = ch1(&after);
+    assert!(got.contains(r#"<div class="keep">"#), "got {got}");
+    assert!(got.contains("<p>other</p>"), "got {got}");
+}
+
+/// An image whose file is merely misfiled is repointed, never deleted — the
+/// deletion is reserved for a proven absence, after all five candidates fail.
+#[test]
+fn an_image_that_resolves_elsewhere_is_repointed_not_removed() {
+    let (outcome, after) = fix(&book_img(r#"<p><img alt="" src="../pics/real.jpg"/></p>"#));
+    let got = ch1(&after);
+    assert!(got.contains("images/real.jpg"), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("repointed")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// `<a>` is not covered by the policy revision: it carries navigation.
+#[test]
+fn a_dead_hyperlink_is_still_reported_rather_than_removed() {
+    let (outcome, after) = fix(&book_img(r#"<p><a href="gone.xhtml">chapter</a></p>"#));
+    assert!(ch1(&after).contains("gone.xhtml"), "got {}", ch1(&after));
+    assert!(!outcome.findings.is_empty(), "got {:?}", outcome.findings);
+}
+
+#[test]
+fn keep_missing_images_restores_the_report() {
+    let opts = epubfix::Options {
+        keep_missing_images: true,
+        ..Default::default()
+    };
+    let before = book_img(r#"<h1>T</h1><p class="ct-2"><img alt="" src="gone.jpg"/></p>"#);
+    let (outcome, after) = common::roundtrip_with(&before, &opts);
+
+    assert!(ch1(&after).contains("gone.jpg"), "got {}", ch1(&after));
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("gone.jpg")),
+        "got {:?}",
+        outcome.findings
+    );
+}

@@ -249,6 +249,27 @@ pub fn scan(src: &str) -> Result<Vec<Node>, ScanError> {
 /// about well-formedness — so anything that wants to *report* on the document
 /// has to ask separately, with the checks turned on.
 ///
+/// Widen a deletion to swallow the whole line, when the element sits alone on
+/// one.
+///
+/// Deleting only the element leaves a blank line where it was. One is
+/// invisible; four in a row — which is exactly what an OPF padded with empty
+/// `dc:*` elements produces — makes the diff look like something went wrong.
+/// A span sharing its line with anything else is returned unchanged.
+pub fn line_span(src: &str, span: Range<usize>) -> Range<usize> {
+    let start = src[..span.start].rfind('\n').map_or(0, |i| i + 1);
+    if !src[start..span.start].trim().is_empty() {
+        return span;
+    }
+    let end = src[span.end..]
+        .find('\n')
+        .map_or(src.len(), |i| span.end + i + 1);
+    if !src[span.end..end].trim().is_empty() {
+        return span;
+    }
+    start..end
+}
+
 /// An EPUB content document is required to be XML, and one that is not is
 /// fatal: EPUB Check stops reading the file. Nothing else in this crate will
 /// notice, because every fixer skips what it cannot scan.

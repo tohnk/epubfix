@@ -125,14 +125,21 @@ fn a_dead_stylesheet_or_script_include_is_removed() {
 }
 
 #[test]
-fn a_missing_image_is_reported_and_never_deleted() {
-    // The one defect that stayed manual across 37 books: genuine content loss
-    // in the source. Deleting the element would hide it.
+fn a_proven_missing_image_is_removed_and_named() {
+    // This was the one defect that stayed manual across 37 books, on the rule
+    // that an <img> is never deleted. The rule was too absolute: by the time
+    // the resolver reports Missing it has tried five candidate paths, so the
+    // file is absent under every spelling and the element renders as a broken
+    // placeholder forever. Deleting is the honest outcome, provided it is
+    // reported by name — which is why this is a change and not a finding.
     let opf = opf2(
         r#"    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
         r#"<itemref idref="ch1"/>"#,
     );
-    let ch1 = doc("", r#"<p><img src="images/Art_logo.jpg" alt="logo"/></p>"#);
+    let ch1 = doc(
+        "",
+        "<h1>About the Publisher</h1>\n<p><img src=\"images/Art_logo.jpg\" alt=\"logo\"/></p>",
+    );
     let (outcome, after) = fix(&book(&[
         ("META-INF/container.xml", CONTAINER),
         ("OEBPS/content.opf", &opf),
@@ -140,14 +147,14 @@ fn a_missing_image_is_reported_and_never_deleted() {
         ("OEBPS/ch1.xhtml", &ch1),
     ]));
 
-    assert!(entry(&after, "OEBPS/ch1.xhtml").contains("Art_logo.jpg"));
+    assert!(!entry(&after, "OEBPS/ch1.xhtml").contains("Art_logo.jpg"));
     assert!(
         outcome
-            .findings
+            .changes
             .iter()
-            .any(|f| f.contains("Art_logo.jpg") && f.contains("left alone")),
-        "got {:?}",
-        outcome.findings
+            .any(|c| c.contains("Art_logo.jpg") && c.contains("logo")),
+        "the alt text names it for the reader: {:?}",
+        outcome.changes
     );
 }
 

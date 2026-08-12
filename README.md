@@ -32,6 +32,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `opf-version` | OPF-001 | `<package version="1.0">` (OEBPS 1.0) → `"2.0"` |
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
 | `font-media-type` | CSS-007 | fixes the `application/application/x-font-ttf` typo |
+| `empty-metadata` | OPF-054 | removes `<dc:*>` elements with no content, keeping the three both versions require |
 | `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
 | `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
@@ -44,7 +45,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `misplaced-blockquotes` | RSC-005 | splits a paragraph around a `<blockquote>` it swallowed, or demotes the quotation to a `<span>` |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
 | `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
-| `dangling-resources` | RSC-007 | repoints references whose file moved, and drops dead stylesheet/script includes — never an `<img>` or `<a>` |
+| `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead stylesheet/script includes, and an `<img>` whose file is proven absent — never an `<a>` |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
 | `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
@@ -142,8 +143,29 @@ one is ambiguous, so is every shorter one, and the answer is a report.
 
 When nothing resolves, what gets deleted is whatever unit has become
 meaningless — the whole `@font-face` (a face with no source is nothing), the
-`@import` statement, or just the one declaration. Never an `<img>` or an `<a>`:
-those carry content, and their absence is a defect to report.
+`@import` statement, or just the one declaration.
+
+An `<a>` is never deleted: it carries navigation, and its absence is a defect to
+report. An `<img>` used to be treated the same way, and that was too absolute.
+The distinction that matters is not the element type but whether the file might
+exist somewhere, and by the time all five candidates have failed it does not —
+not under any path, spelling or case. The choice is then between an element that
+renders as a broken-image placeholder forever and no element at all, on a page
+that is already not showing what it should. So it goes, with three constraints:
+
+* **the wrapper goes too, when the image was its only content.** In *The Hobbit*
+  the `<img>` sits alone in `<p class="ct-2">`, and an empty paragraph can still
+  take vertical space. Only one level — a `<div>` holding other material stays,
+  and so does a wrapper holding a caption.
+* **unless that would empty the `<body>`.** Measured: removing the lone wrapper
+  produces `element "body" incomplete`, a worse error than the RSC-007 being
+  fixed. The empty `<p>` stays and the book still reaches zero.
+* **it is reported by name**, with the alt text when there is one, as a change
+  rather than a finding. This is the one repair that removes something a reader
+  could have seen.
+
+`--keep-missing-images` restores the old behaviour. It is off by default because
+the page is already broken and the `.bak` beside the book keeps the record.
 
 ### Working out a book's language
 
@@ -355,6 +377,9 @@ epubfix [OPTIONS] [FILE_OR_DIR ...]
     --language-detect=MODE
                     when a missing <dc:language> may be written from
                     detected text: en-only (default), any, or off
+    --keep-missing-images
+                    report an <img> whose file is proven absent instead
+                    of removing it and its now-empty wrapper
     --only NAMES    run only these fixers (comma-separated, see --list)
 -l, --list          list the available fixers and exit
     --pause         wait for Enter before exiting
@@ -523,10 +548,15 @@ a schema mentions somewhere.
 | `[^A-Za-z0-9_.-]` in a filename is unsafe | only `" * : < > ? \ \|`, controls (PKG-009) and spaces (PKG-010); `!$&'()*+,;=@~` and all non-ASCII are fine |
 | `<pageList>` missing `id` or `class` | the two are *co-required*: neither is clean, both is clean, exactly one is the error |
 | any absolute-URL `href` is a remote resource | hyperlinks are not; only embedding contexts (`img@src`, `object@data`, …) count |
+| an empty `<dc:*>` is safe to delete | not for the three required ones: absent `<dc:title>` is `metadata incomplete`, a harder error than the empty one |
+| an empty wrapper left by a removed `<img>` is untidy | removing it when it is the body's only child is `element "body" incomplete` |
 
 The first cost five books' worth of pointless entity rewriting, the second 321
 renames in a single book, and the fourth actually *introduced* two OPF-018
-warnings into a package that had none. Each was caught only by running epubcheck
+warnings into a package that had none. The last two are the same shape caught
+before shipping: both were specified as unconditional and both would have traded
+one error for a worse one, which is why the guards exist and why each has a
+test quoting the measurement. Each was caught only by running epubcheck
 against the book and finding it had nothing to say — which is the rule's
 corollary: **verify by re-running epubcheck, not by reasoning about the fix.**
 The error count must strictly decrease and no new error *code* may appear.
@@ -614,6 +644,16 @@ goes from 1 fatal + 11 errors to 0 by being retagged downward.
 *Butcher's Crossing* — the book the path work came from — goes from 3 errors to
 0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
 intact, and the NCX identifier synced.
+
+*The Hobbit* is where the last two classes came from. Its metadata is padded
+with `<dc:date/>`, `<dc:subject/>`, `<dc:description/>` and `<dc:rights/>`, only
+the first of which epubcheck reports — an empty string is not a W3C date, and
+the other three are legal and equally meaningless. And it references
+`images/Art_logo.jpg`, the publisher's logo on the "About the Publisher" page,
+which is absent from the archive, absent from the manifest, and shares no
+basename with any image that is present. That image was the one defect in a
+37-book sweep that resisted repair, under the rule that an `<img>` is never
+deleted; it is now removed along with the `<p>` it was alone in.
 
 Three more real books, each the source of one class above, all reach 0. A study
 Bible whose cover landmark pointed at `kindle:embed:0002` goes from 3 to 0, the

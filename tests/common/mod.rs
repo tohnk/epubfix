@@ -356,6 +356,39 @@ pub fn roundtrip_migrated(bytes: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u
     (outcome, read_epub(&out.into_inner()))
 }
 
+/// Every image a body refers to by a plain relative path.
+///
+/// Without this a fixture asking about, say, `align` on an `<img>` is also
+/// silently asking about an image whose file is not in the archive — and since
+/// a proven-missing image is now removed rather than reported, the subject of
+/// the test disappears before the assertion runs. A book that mentions a
+/// picture should contain it; a test that wants a *missing* one builds its own
+/// archive rather than going through here.
+fn referenced_images(bodies: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for body in bodies {
+        for (_, rest) in body.match_indices("src=\"").map(|(i, _)| body.split_at(i + 5)) {
+            let Some(path) = rest.split('"').next() else {
+                continue;
+            };
+            if path.contains(':') || path.starts_with('/') || path.contains("..") {
+                continue;
+            }
+            if ends_with_any(&path.to_ascii_lowercase(), IMAGES) && !out.contains(&path.to_string())
+            {
+                out.push(path.to_string());
+            }
+        }
+    }
+    out
+}
+
+const IMAGES: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".svg"];
+
+fn ends_with_any(name: &str, exts: &[&str]) -> bool {
+    exts.iter().any(|e| name.ends_with(e))
+}
+
 fn build(v3: bool, ch1_body: &str, ch2_body: &str) -> Vec<u8> {
     let opf = if v3 { opf3() } else { opf2() };
     let ch1 = chapter(ch1_body, v3);
@@ -371,6 +404,11 @@ fn build(v3: bool, ch1_body: &str, ch2_body: &str) -> Vec<u8> {
     } else {
         files.push(("OEBPS/toc.ncx", CLEAN_NCX.as_bytes()));
     }
+    let images: Vec<String> = referenced_images(&[ch1_body, ch2_body])
+        .iter()
+        .map(|p| format!("OEBPS/{p}"))
+        .collect();
+    files.extend(images.iter().map(|p| (p.as_str(), b"\xFF\xD8\xFF\xE0".as_slice())));
     make_epub(&files)
 }
 
