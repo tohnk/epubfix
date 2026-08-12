@@ -29,18 +29,44 @@ use crate::util::ends_with_any;
 /// What to do with a presentational attribute the ruleset rejects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Presentation {
-    /// Remove it, and report the ones no stylesheet was already overriding.
-    #[default]
-    Strip,
-    /// Convert it to an equivalent inline `style` declaration first.
+    /// Keep whatever the attribute was actually doing: convert it to an inline
+    /// declaration when nothing was overriding it, strip it when something was.
     ///
-    /// This is not strictly safer than stripping, and can be worse. An inline
-    /// style sits *above* author rules in the cascade, where the attribute sat
-    /// below them — so on a Calibre book whose stylesheet sets
+    /// Neither of the other two is right on its own, because they answer a
+    /// question the book has already answered. A presentational attribute
+    /// contributes *below* author stylesheets, so if a rule sets the property
+    /// the attribute has been inert for as long as the book has existed and
+    /// removing it cannot change the page. If no rule sets it, the attribute is
+    /// the only thing holding the layout up and removing it drops to the user
+    /// agent default.
+    ///
+    /// *The Hero of Ages* is the case that forced this. Its Ars Arcanum table
+    /// carries `width` on 75 cells, its stylesheet declares no width at all, and
+    /// stripping all 75 reflows a reference table people actually consult.
+    /// Meanwhile the same run's `valign` attributes are overridden 9 times in
+    /// 10, where converting would be the harmful move. One policy cannot be
+    /// right for both; asking is right for both.
+    ///
+    /// The override test is an approximation ([`crate::css`]), and this is the
+    /// one place its answer changes bytes rather than a report. That is
+    /// tolerable because its bias runs the safe way: it matches element names
+    /// and classes anywhere in a selector, so it *over*-reports "declared",
+    /// which lands on stripping — exactly what this tool did before.
+    #[default]
+    Faithful,
+    /// Always convert, whether or not a stylesheet was already overriding it.
+    ///
+    /// An inline style sits *above* author rules in the cascade, where the
+    /// attribute sat below them — so on a Calibre book whose stylesheet sets
     /// `vertical-align: middle` on the rows, converting 693 `valign="top"`
-    /// attributes changes the rendering that stripping them leaves alone. It
-    /// is the right choice only for a book with no stylesheet worth the name.
+    /// attributes changes the rendering that [`Presentation::Faithful`] leaves
+    /// alone. It is the right choice only for a book with no stylesheet worth
+    /// the name.
     Preserve,
+    /// Always remove it, and report the ones no stylesheet was overriding.
+    ///
+    /// The tidiest markup and the least faithful rendering.
+    Strip,
 }
 
 /// Attributes HTML5 removed, by element.
@@ -247,6 +273,7 @@ impl Fixer for LegacyTableAttrs {
         // and, under --preserve-presentation, ones with no CSS spelling at all.
         let mut unoverridden: Vec<String> = Vec::new();
         let mut no_equivalent: Vec<String> = Vec::new();
+        let mut converted = 0usize;
         // Tally by attribute name so a dry run says what it would take out.
         let mut tally: Vec<(String, usize)> = Vec::new();
         let mut bump = |name: &str| match tally.iter_mut().find(|(n, _)| n == name) {
@@ -281,24 +308,28 @@ impl Fixer for LegacyTableAttrs {
                     edits.delete(attr.span_with_space.clone());
                     bump(&attr.name);
 
-                    match self.mode {
-                        Presentation::Preserve => {
-                            match inline_style(&node.name, &attr.name, &attr.value) {
-                                Some(decl) => carried.push(decl),
-                                None => no_equivalent.push(attr.name.clone()),
+                    // Was this attribute doing anything? If a stylesheet
+                    // already sets the property it has been overridden for as
+                    // long as the book has existed, and removing it cannot
+                    // change the page.
+                    let overridden = css_property(&node.name, &attr.name)
+                        .is_some_and(|prop| sheet.declares(&node.name, classes, prop));
+                    let inline = match self.mode {
+                        Presentation::Preserve => true,
+                        Presentation::Strip => false,
+                        Presentation::Faithful => !overridden,
+                    };
+
+                    if inline {
+                        match inline_style(&node.name, &attr.name, &attr.value) {
+                            Some(decl) => {
+                                carried.push(decl);
+                                converted += 1;
                             }
+                            None => no_equivalent.push(attr.name.clone()),
                         }
-                        // Only worth mentioning where the attribute was doing
-                        // something: if a stylesheet already sets the property,
-                        // it has been overridden for as long as the book has
-                        // existed and removing it cannot change the page.
-                        Presentation::Strip => {
-                            if let Some(prop) = css_property(&node.name, &attr.name)
-                                && !sheet.declares(&node.name, classes, prop)
-                            {
-                                unoverridden.push(attr.name.clone());
-                            }
-                        }
+                    } else if !overridden {
+                        unoverridden.push(attr.name.clone());
                     }
                 }
                 merge_style(&mut edits, node, &carried);
@@ -323,36 +354,73 @@ impl Fixer for LegacyTableAttrs {
             }
         }
 
-        let total: usize = tally.iter().map(|(_, c)| c).sum();
-        if total > 0 {
-            tally.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            let detail: Vec<String> = tally.iter().map(|(n, c)| format!("{n}x{c}")).collect();
-            let verb = match self.mode {
-                Presentation::Strip => "stripped",
-                Presentation::Preserve => "converted to inline style",
-            };
-            outcome.push_change(format!(
-                "{verb} {total} legacy attribute(s) for EPUB {version} [{}]",
-                detail.join(", ")
-            ));
-        }
-        if !unoverridden.is_empty() {
-            outcome.push_finding(format!(
-                "{} of those {total} attribute(s) were not already overridden by a stylesheet \
-                 rule, so removing them may change how the page looks [{}]",
-                unoverridden.len(),
-                summarise(&unoverridden)
-            ));
-        }
-        if !no_equivalent.is_empty() {
-            outcome.push_finding(format!(
-                "{} attribute(s) have no single-property CSS equivalent and were removed \
-                 rather than converted [{}]",
-                no_equivalent.len(),
-                summarise(&no_equivalent)
-            ));
-        }
+        report(
+            &mut outcome,
+            self.mode,
+            version,
+            &mut tally,
+            converted,
+            &unoverridden,
+            &no_equivalent,
+        );
         outcome
+    }
+}
+
+/// Turn the tallies into the run's report lines.
+fn report(
+    outcome: &mut Outcome,
+    mode: Presentation,
+    version: u32,
+    tally: &mut [(String, usize)],
+    converted: usize,
+    unoverridden: &[String],
+    no_equivalent: &[String],
+) {
+    let total: usize = tally.iter().map(|(_, c)| c).sum();
+    if total > 0 {
+        tally.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let detail: Vec<String> = tally.iter().map(|(n, c)| format!("{n}x{c}")).collect();
+        let detail = detail.join(", ");
+        let line = match mode {
+            Presentation::Preserve => format!(
+                "converted {total} legacy attribute(s) to inline style for EPUB {version} \
+                 [{detail}]"
+            ),
+            Presentation::Strip => {
+                format!("stripped {total} legacy attribute(s) for EPUB {version} [{detail}]")
+            }
+            // Say which was which rather than pick a word that is half true.
+            Presentation::Faithful if converted > 0 && converted < total => format!(
+                "moved {converted} legacy attribute(s) into inline CSS and stripped {} that a \
+                 stylesheet already overrode, for EPUB {version} [{detail}]",
+                total - converted
+            ),
+            Presentation::Faithful if converted > 0 => format!(
+                "moved {total} legacy attribute(s) into inline CSS for EPUB {version} [{detail}]"
+            ),
+            Presentation::Faithful => format!(
+                "stripped {total} legacy attribute(s) a stylesheet already overrode, for EPUB \
+                 {version} [{detail}]"
+            ),
+        };
+        outcome.push_change(line);
+    }
+    if !unoverridden.is_empty() {
+        outcome.push_finding(format!(
+            "{} of those {total} attribute(s) were not already overridden by a stylesheet rule, \
+             so removing them may change how the page looks [{}]",
+            unoverridden.len(),
+            summarise(unoverridden)
+        ));
+    }
+    if !no_equivalent.is_empty() {
+        outcome.push_finding(format!(
+            "{} attribute(s) have no single-property CSS equivalent and were removed rather than \
+             converted [{}]",
+            no_equivalent.len(),
+            summarise(no_equivalent)
+        ));
     }
 }
 

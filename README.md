@@ -90,25 +90,45 @@ Stripping attributes that EPUB 2 permits would change how those books render for
 no validation benefit, so it does not. The split was **measured against EPUB
 Check 5.2.1**, not read off a specification, and `tests/content.rs` pins it.
 
-Stripping the rest is not automatically invisible either. A presentational
-attribute contributes at the presentational-hints origin, *below* author
-stylesheets: if a rule already sets the property the attribute has been doing
-nothing for years and removing it cannot change the page, and if none does,
-removing it falls back to the user-agent default. So the default run scans the
-book's own stylesheets for a rule matching the element's name or classes and
-reports the difference — "4 of those 12 attributes were not already overridden
-by a stylesheet rule". In the Calibre books this was built for, the generated
-stylesheet covers all of them and the report stays quiet.
+Removing one is not automatically invisible either, and this is where the
+default stopped being "strip". A presentational attribute contributes at the
+presentational-hints origin, *below* author stylesheets. So the book has already
+answered the question:
 
-`--preserve-presentation` converts instead of removing: `valign="top"` becomes
-`vertical-align: top` in the element's `style`, `align="left"` on an image
-becomes `float: left` rather than `text-align`, and `cellpadding` — which has
-no single-property equivalent, since it describes the cells — is removed and
-reported. **This is not the safer option.** An inline style sits *above* author
-rules where the attribute sat below them, so on a book whose stylesheet already
-sets `vertical-align: middle`, converting 693 `valign="top"` attributes changes
-the rendering that stripping them leaves alone. It is the right choice only for
-a book with no stylesheet worth the name.
+* **a stylesheet sets the property** — the attribute has been inert for as long
+  as the book has existed, and removing it cannot change the page;
+* **no stylesheet sets it** — the attribute is the only thing holding that
+  layout up, and removing it drops to the user-agent default.
+
+So each attribute is asked individually: **rehoused in the element's `style`
+when nothing was overriding it, stripped when something was.** `valign="top"`
+becomes `vertical-align: top`, `align="left"` on an image becomes `float: left`
+rather than `text-align`, and `cellpadding` — which has no single-property
+equivalent, since it describes the cells — is removed and reported.
+
+*The Hero of Ages* is what forced this. Its Ars Arcanum table carries `width` on
+75 cells, its stylesheet declares no width at all, and stripping all 75 reflows
+a reference table people actually consult. In the same run its 191 `valign`,
+`text` and `link` attributes *were* covered by rules and are simply removed:
+
+```
+moved 75 legacy attribute(s) into inline CSS and stripped 191 that a
+stylesheet already overrode, for EPUB 2 [linkx95, textx95, widthx75, ...]
+```
+
+No single policy is right for both, which is why there is no longer a single
+policy. This is also the one place the CSS-override check ([`src/css.rs`])
+changes bytes rather than a line of report, and that is only tolerable because
+its bias runs the safe way: it matches element names and classes anywhere in a
+selector, so it *over*-reports "declared", which lands on stripping — exactly
+what the tool did before.
+
+Both absolutes are still available. `--preserve-presentation` converts
+everything, including attributes a stylesheet was overriding; since an inline
+style sits *above* author rules where the attribute sat below them, that is the
+one setting that can change rendering a book was previously getting right.
+`--strip-presentation` removes everything, which is the tidiest markup and the
+least faithful page.
 
 The same version split decides how `misplaced-anchors` repairs things. Moving a
 stranded `<a>` to just after `</table>` is valid in EPUB 3, but in EPUB 2 an

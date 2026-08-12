@@ -102,7 +102,7 @@ impl Default for Options {
             only: Vec::new(),
             migrate_epub3: false,
             keep_version: false,
-            presentation: Presentation::Strip,
+            presentation: Presentation::Faithful,
             language: LanguagePolicy::EnglishOnly,
             keep_missing_images: false,
         }

@@ -29,7 +29,10 @@ const TABLE: &str = r#"<table border="0" cellpadding="0" valign="top">
 
 #[test]
 fn epub3_strips_the_whole_legacy_set() {
-    let (outcome, after) = fix(&epub3(TABLE, "<p>x</p>"));
+    // Strip mode, for the same reason as the EPUB 2 case: this is about the
+    // ruleset's removal list, and the default would rehouse some of these in
+    // CSS whose property names contain the attribute names.
+    let (outcome, after) = fix_stripping(&epub3(TABLE, "<p>x</p>"));
     let doc = ch1(&after);
 
     assert!(outcome.has_changes(), "expected changes");
@@ -60,7 +63,10 @@ fn epub2_keeps_what_xhtml11_allows_and_strips_what_it_does_not() {
     // The regression that matters most: getting this wrong silently degrades
     // every EPUB 2 book in a library sweep. The kept/stripped split was measured
     // against EPUB Check 5.2.1, not read off a spec.
-    let (outcome, after) = fix(&epub2(TABLE, "<p>x</p>"));
+    // Asked in strip mode: this test is about which attributes the *ruleset*
+    // allows, and the default now also weighs whether each one is still doing
+    // anything, which is a different question with its own tests below.
+    let (outcome, after) = fix_stripping(&epub2(TABLE, "<p>x</p>"));
     let doc = ch1(&after);
 
     // Legal in XHTML 1.1 - must survive untouched.
@@ -342,6 +348,18 @@ fn everything_at_once_stays_idempotent() {
 // ---------------------------------------------------------------------------
 
 /// Run with `--preserve-presentation` instead of the default strip.
+/// The `--strip-presentation` path: remove every legacy attribute, whether or
+/// not it was still doing something. This was the default until the Ars Arcanum
+/// table of *The Hero of Ages* showed 75 of 75 cell widths holding up a layout
+/// no stylesheet mentioned.
+fn fix_stripping(before: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
+    let opts = epubfix::Options {
+        presentation: epubfix::Presentation::Strip,
+        ..epubfix::Options::default()
+    };
+    common::roundtrip_with(before, &opts)
+}
+
 fn fix_preserving(before: &[u8]) -> (epubfix::Outcome, Vec<(String, Vec<u8>)>) {
     let opts = epubfix::Options {
         presentation: epubfix::Presentation::Preserve,
@@ -359,7 +377,7 @@ fn preserve_presentation_converts_attributes_to_inline_style() {
         outcome
             .changes
             .iter()
-            .any(|c| c.contains("converted to inline style")),
+            .any(|c| c.contains("to inline style")),
         "got {:?}",
         outcome.changes
     );
@@ -421,7 +439,7 @@ fn stripping_reports_only_the_attributes_no_stylesheet_was_overriding() {
 </table>"#;
     let css = ".calibre7 { vertical-align: middle }\n.calibre8 { vertical-align: inherit }\n";
     let before = common::epub3_with_css(body, css);
-    let (outcome, _) = fix(&before);
+    let (outcome, _) = fix_stripping(&before);
 
     let finding = outcome
         .findings
@@ -446,6 +464,109 @@ fn a_book_whose_stylesheet_covers_everything_draws_no_report() {
             .findings
             .iter()
             .any(|f| f.contains("not already overridden")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The default: keep whatever the attribute was actually doing
+// ---------------------------------------------------------------------------
+
+/// An attribute no stylesheet was overriding is the only thing holding that
+/// layout up, so it moves into CSS rather than being dropped.
+///
+/// *The Hero of Ages* is why: its Ars Arcanum table sets `width` on 75 cells,
+/// the stylesheet declares no width at all, and stripping all 75 reflows a
+/// reference table people actually consult.
+#[test]
+fn an_attribute_nothing_overrides_is_rehoused_in_css() {
+    let body = r#"<table class="t"><tr class="r"><td class="c" width="191">cell</td></tr></table>"#;
+    let (outcome, after) = fix(&common::epub3_with_css(body, ".c { color: black }\n"));
+    let doc = ch1(&after);
+
+    assert!(doc.contains("width: 191px"), "{doc}");
+    assert!(!doc.contains(r#"width="191""#), "{doc}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("into inline CSS")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// One a stylesheet *was* overriding has been inert for as long as the book has
+/// existed, so it is simply removed — converting it would raise it above the
+/// author rule and change the page in the other direction.
+#[test]
+fn an_attribute_the_stylesheet_overrides_is_stripped() {
+    let body = r#"<table class="t"><tr class="r" valign="top"><td class="c">cell</td></tr></table>"#;
+    let (outcome, after) = fix(&common::epub3_with_css(
+        body,
+        ".r { vertical-align: middle }\n",
+    ));
+    let doc = ch1(&after);
+
+    assert!(!doc.contains("valign"), "{doc}");
+    assert!(!doc.contains("vertical-align"), "it must not be rehoused: {doc}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("already overrode")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// The two answers in one document, which is the ordinary case.
+#[test]
+fn a_mixed_table_gets_both_treatments_and_the_report_says_so() {
+    let body = r#"<table class="t">
+  <tr class="r" valign="top"><td class="c" width="191">cell</td></tr>
+</table>"#;
+    let (outcome, after) = fix(&common::epub3_with_css(
+        body,
+        ".r { vertical-align: middle }\n",
+    ));
+    let doc = ch1(&after);
+
+    assert!(doc.contains("width: 191px"), "the width was load-bearing: {doc}");
+    assert!(!doc.contains("vertical-align"), "the valign was not: {doc}");
+    let line = outcome
+        .changes
+        .iter()
+        .find(|c| c.contains("legacy attribute"))
+        .unwrap_or_else(|| panic!("got {:?}", outcome.changes));
+    assert!(line.contains("moved 1"), "{line}");
+    assert!(line.contains("stripped 1"), "{line}");
+}
+
+/// Nothing to warn about any more: the default no longer removes anything that
+/// was doing something, so the old "may change how the page looks" finding has
+/// nothing to report unless stripping was asked for explicitly.
+#[test]
+fn the_default_draws_no_rendering_warning() {
+    let body = r#"<table class="t"><tr class="r"><td class="c" width="191">cell</td></tr></table>"#;
+    let (outcome, _) = fix(&common::epub3_with_css(body, ".c { color: black }\n"));
+    assert!(
+        !outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("not already overridden")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+/// An attribute with no faithful CSS spelling still cannot be converted, and
+/// saying so is the honest outcome rather than inventing a declaration.
+#[test]
+fn an_attribute_with_no_css_equivalent_is_still_reported() {
+    let body = r#"<table class="t" cellpadding="8"><tr class="r"><td class="c">cell</td></tr></table>"#;
+    let (outcome, after) = fix(&common::epub3_with_css(body, ".c { color: black }\n"));
+    assert!(!ch1(&after).contains("cellpadding"), "{}", ch1(&after));
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("no single-property CSS equivalent")),
         "got {:?}",
         outcome.findings
     );

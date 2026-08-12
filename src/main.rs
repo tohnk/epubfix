@@ -27,8 +27,11 @@ OPTIONS:
         --migrate-epub3 force an upgrade to EPUB 3 even if unnecessary
         --keep-version  never change a book's declared EPUB version
         --preserve-presentation
-                        convert legacy table attributes to inline CSS
-                        instead of removing them
+                        convert every legacy presentational attribute to
+                        inline CSS, even ones a stylesheet was overriding
+        --strip-presentation
+                        remove them all instead, even ones holding up the
+                        layout (the default keeps whichever the book needs)
         --language-detect=MODE
                         when a missing <dc:language> may be written from
                         detected text: en-only (default), any, or off
@@ -109,6 +112,9 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Option<Args>, String> {
             "--keep-missing-images" => parsed.opts.keep_missing_images = true,
             "--preserve-presentation" => {
                 parsed.opts.presentation = epubfix::Presentation::Preserve;
+            }
+            "--strip-presentation" => {
+                parsed.opts.presentation = epubfix::Presentation::Strip;
             }
             a if a.starts_with("--language-detect") => {
                 let mode = a.strip_prefix("--language-detect=").unwrap_or("");
