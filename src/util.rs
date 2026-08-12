@@ -12,6 +12,14 @@ pub const TEXTUAL: &[&str] = &[
 /// Extensions treated as content documents (where `id`/`name` live).
 pub const MARKUP: &[&str] = &[".html", ".xhtml", ".htm"];
 
+/// Every entry an EPUB requires to be well-formed XML.
+///
+/// Wider than [`MARKUP`], because the package document and the NCX are XML too
+/// and a pass that breaks one of those is just as fatal.
+pub const XML: &[&str] = &[
+    ".html", ".xhtml", ".htm", ".opf", ".ncx", ".svg", ".xml",
+];
+
 /// Characters that are illegal in an XML Name.
 ///
 /// This is deliberately stricter than the XML specification, which allows a

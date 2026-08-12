@@ -565,6 +565,7 @@ a schema mentions somewhere.
 | a `<body>` holding only an `<svg>` has no block content | `ns:svg` is in the permitted set epubcheck prints; an SVG cover page is a document, not a fragment |
 | an empty `<body>` has nothing to repair | it is `element "body" incomplete` under EPUB 2 — and clean under EPUB 3, so the container is version-gated |
 | a content document is a file ending `.html`/`.xhtml` | it is whatever the manifest declares `application/xhtml+xml`, whatever it is called |
+| an element has a start tag and an end tag to rewrite | a self-closing one has neither pair; replacing only the start tag emits an unclosed element |
 
 The first cost five books' worth of pointless entity rewriting, the second 321
 renames in a single book, and the fourth actually *introduced* two OPF-018
@@ -612,6 +613,30 @@ All of that together is still a small fraction of what EPUB Check looks at, so
 **silence here is not validity** — which is why the caveat prints alongside the
 counts rather than being left for the reader to infer. Exit status 3 covers this
 as well as findings, so a library sweep can be scripted on it.
+
+### No pass may leave a document worse than it found it
+
+The tool once wrote a book it had already diagnosed as broken. `nested-anchors`
+met a *self-closing* inner anchor — `<a id="page_viii"/>` — replaced its start
+tag with `<span id="page_viii">` and its end tag with `</span>`, except there
+was no end tag, so the `<span>` was never closed. Two content-model errors
+became two **fatal** ones, and the closing scan said so:
+
+```
+not well-formed XML at line 41 (expected `</span>`, but `</a>` was found)
+```
+
+and the file was saved anyway. That is the worst thing a repair tool can do,
+and the bug is the smaller half of it.
+
+So each pass now runs against an undo log. Any XML entry that parsed before the
+pass and does not parse after it causes the **whole pass** to be rolled back —
+not just the damaged file, because nothing at that point can tell which of its
+edits were the bad ones — and the pass reports what it declined instead of
+claiming a change. The defect it meant to repair is still there, which is the
+right outcome: a reported error beats a book nothing can open. The check is
+differential like every other gate here, so a book that arrives with an
+unclosed tag is still worked on.
 
 A crash counts as a failed book, not a failed run. A comment inside
 `<metadata>` was once enough to abort a sweep partway through, which on a
@@ -668,6 +693,9 @@ goes from 1 fatal + 11 errors to 0 by being retagged downward.
 *Butcher's Crossing* — the book the path work came from — goes from 3 errors to
 0: two dead `@font-face` rules removed with all 21 `font-family` fallbacks
 intact, and the NCX identifier synced.
+
+*A New History of Western Philosophy* goes from 4 errors to 0, and is the book
+that produced the rollback guarantee above.
 
 A Kobo *Essays and Aphorisms* goes from 57 errors to 0, and the last one of
 those took two fixes that are worth stating separately. It ships an empty XHTML

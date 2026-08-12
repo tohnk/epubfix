@@ -238,9 +238,56 @@ where
 pub fn fix_book_with(book: &mut Book, fixers: &[Box<dyn Fixer>]) -> Outcome {
     let mut outcome = Outcome::none();
     for f in fixers {
-        outcome.merge(f.apply(book));
+        book.begin_pass();
+        let result = f.apply(book);
+        let damaged = damaged_by(book);
+
+        if damaged.is_empty() {
+            outcome.merge(result);
+            continue;
+        }
+        // The pass broke a document that parsed before it ran. Its other edits
+        // may be perfectly good, but nothing here can tell which bytes were the
+        // bad ones, so the whole pass is rolled back and its changes are not
+        // claimed. The defect it meant to repair is still there, which is the
+        // right outcome: a reported error beats a book nothing can open.
+        for name in book
+            .pass_changes()
+            .map(|(n, _)| n.clone())
+            .collect::<Vec<_>>()
+        {
+            book.revert(&name);
+        }
+        outcome.push_finding(format!(
+            "the {} pass would have left {} malformed, so none of it was applied; \
+             whatever it was meant to repair is still there",
+            f.name(),
+            damaged.join(", ")
+        ));
     }
     outcome
+}
+
+/// Entries this pass turned from well-formed XML into not.
+///
+/// The check is differential, like every other gate here: a book that arrives
+/// with an unclosed tag is not this pass's fault, and blaming it would make the
+/// tool refuse exactly the books that most need help. Only XML entries are
+/// asked, since a stylesheet is not XML and never was.
+fn damaged_by(book: &Book) -> Vec<String> {
+    let mut damaged: Vec<String> = book
+        .pass_changes()
+        .filter(|(name, _)| util::ends_with_any(name, util::XML))
+        .filter(|(name, before)| {
+            markup::well_formed(before).is_ok()
+                && book
+                    .text(name)
+                    .is_some_and(|after| markup::well_formed(after).is_err())
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    damaged.sort();
+    damaged
 }
 
 /// Repair one EPUB in place.

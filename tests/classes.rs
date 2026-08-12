@@ -2005,3 +2005,50 @@ fn the_ncx_is_not_mistaken_for_a_content_document() {
     assert!(outcome.changes.is_empty(), "got {:?}", outcome.changes);
     assert_eq!(entry(&after, "OEBPS/toc.ncx"), NCX);
 }
+
+// ---------------------------------------------------------------------------
+// nested anchors: the self-closing inner anchor
+// ---------------------------------------------------------------------------
+
+/// A self-closing inner anchor has no end tag to rewrite, so the replacement
+/// has to be a whole element rather than an opening tag.
+///
+/// The real markup, from *A New History of Western Philosophy*:
+///
+/// ```html
+/// <a class="nounder" href="ch02.html#x"><a id="page_viii"/>Stoicism</a>
+/// ```
+///
+/// Emitting `<span id="page_viii">` there left it unclosed and turned two
+/// content-model errors into two *fatal* ones — a book no reader can open.
+#[test]
+fn a_self_closing_nested_anchor_becomes_a_whole_span() {
+    let (outcome, after) = fix(&book2(
+        r#"<p><a class="nounder" href="ch1.xhtml#x"><a id="page_viii"/>Stoicism</a></p>"#,
+    ));
+    let got = ch1(&after);
+
+    assert!(
+        got.contains(r#"<span id="page_viii"></span>"#),
+        "got {got}"
+    );
+    assert!(got.contains("Stoicism"), "the text stays: {got}");
+    assert!(
+        epubfix::markup::well_formed(&got).is_ok(),
+        "the document must still parse: {got}"
+    );
+    assert!(outcome.remaining.is_empty(), "got {:?}", outcome.remaining);
+}
+
+/// The same shape with no id: nothing worth keeping, so the tag goes entirely
+/// and leaves no stray `</span>` behind.
+#[test]
+fn a_self_closing_nested_anchor_with_no_id_leaves_nothing() {
+    let (_, after) = fix(&book2(
+        r#"<p><a href="ch1.xhtml#x"><a/>Stoicism</a></p>"#,
+    ));
+    let got = ch1(&after);
+    assert!(!got.contains("</span>"), "got {got}");
+    assert!(got.contains("Stoicism"), "got {got}");
+    assert!(epubfix::markup::well_formed(&got).is_ok(), "got {got}");
+}

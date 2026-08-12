@@ -79,3 +79,95 @@ fn visible_text_ignores_markup_and_head() {
     assert_eq!(visible_text(a), visible_text(b));
     assert_ne!(visible_text(a), visible_text("<body><p>Hello</p></body>"));
 }
+
+/// A pass that would leave a document malformed is rolled back whole.
+///
+/// This is the guarantee that matters most, because the tool knew: the closing
+/// scan reported the damage and the book was written anyway. A reported error
+/// beats a book nothing can open, so now the pass is undone and says so.
+#[test]
+fn a_pass_that_breaks_a_document_is_rolled_back() {
+    use epubfix::book::Book;
+    use epubfix::fixers::{Fixer, Outcome};
+    use std::io::Cursor;
+
+    /// Deletes the end tag of every paragraph, which is exactly the shape of
+    /// the real bug: a replacement that is not a whole element.
+    struct Vandal;
+    impl Fixer for Vandal {
+        fn name(&self) -> &'static str {
+            "vandal"
+        }
+        fn codes(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn description(&self) -> &'static str {
+            "test double"
+        }
+        fn apply(&self, book: &mut Book) -> Outcome {
+            for doc in book.markup_names() {
+                if let Some(text) = book.text(&doc).map(str::to_owned) {
+                    book.set_text(&doc, text.replace("</p>", ""));
+                }
+            }
+            Outcome::change("broke everything")
+        }
+    }
+
+    let before = common::epub2("<p>text</p>", "<p>more</p>");
+    let mut book = Book::load(Cursor::new(before.clone())).unwrap();
+    let outcome = epubfix::fix_book_with(&mut book, &[Box::new(Vandal)]);
+
+    assert!(
+        !outcome.has_changes(),
+        "a rolled-back pass must not claim a change: {:?}",
+        outcome.changes
+    );
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("vandal")),
+        "got {:?}",
+        outcome.findings
+    );
+    assert!(
+        book.text("OEBPS/ch1.xhtml").unwrap().contains("</p>"),
+        "the document must be back as it was"
+    );
+}
+
+/// A book that arrives malformed is not this run's fault, and refusing to work
+/// on it would refuse exactly the books that most need help.
+#[test]
+fn a_pass_touching_an_already_malformed_document_still_applies() {
+    use epubfix::book::Book;
+    use epubfix::fixers::{Fixer, Outcome};
+    use std::io::Cursor;
+
+    struct Tidy;
+    impl Fixer for Tidy {
+        fn name(&self) -> &'static str {
+            "tidy"
+        }
+        fn codes(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn description(&self) -> &'static str {
+            "test double"
+        }
+        fn apply(&self, book: &mut Book) -> Outcome {
+            for doc in book.markup_names() {
+                if let Some(text) = book.text(&doc).map(str::to_owned) {
+                    book.set_text(&doc, text.replace("bogus", "fixed"));
+                }
+            }
+            Outcome::change("did a thing")
+        }
+    }
+
+    // Arrives with an unclosed <b>, and stays that way: not ours to blame.
+    let before = common::epub2("<p>bogus <b>text</p>", "<p>more</p>");
+    let mut book = Book::load(Cursor::new(before)).unwrap();
+    let outcome = epubfix::fix_book_with(&mut book, &[Box::new(Tidy)]);
+
+    assert!(outcome.has_changes(), "got {:?}", outcome.findings);
+    assert!(book.text("OEBPS/ch1.xhtml").unwrap().contains("fixed"));
+}

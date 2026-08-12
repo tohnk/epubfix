@@ -37,6 +37,8 @@ pub struct Book {
     renames: BTreeMap<String, String>,
     opf: Option<String>,
     ncx: Option<String>,
+    /// What the current pass overwrote, so it can be rolled back alone.
+    undo: HashMap<String, String>,
 }
 
 impl Book {
@@ -92,6 +94,7 @@ impl Book {
             renames: BTreeMap::new(),
             opf,
             ncx,
+            undo: HashMap::new(),
         })
     }
 
@@ -186,7 +189,32 @@ impl Book {
 
     pub fn set_text(&mut self, name: &str, value: String) {
         if let Some(slot) = self.texts.get_mut(name) {
+            if !self.undo.contains_key(name) {
+                self.undo.insert(name.to_string(), slot.clone());
+            }
             *slot = value;
+        }
+    }
+
+    /// Start a new pass, forgetting how to undo the previous one.
+    ///
+    /// The undo log exists so a pass that damages a document can be rolled
+    /// back on its own, without discarding the work of the passes before it.
+    pub fn begin_pass(&mut self) {
+        self.undo.clear();
+    }
+
+    /// Entries this pass has rewritten, with what they held before it started.
+    pub fn pass_changes(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.undo.iter()
+    }
+
+    /// Put one entry back to what it held at the start of the pass.
+    pub fn revert(&mut self, name: &str) {
+        if let Some(before) = self.undo.remove(name)
+            && let Some(slot) = self.texts.get_mut(name)
+        {
+            *slot = before;
         }
     }
 

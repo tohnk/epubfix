@@ -60,8 +60,11 @@ fn rewrap(edits: &mut Edits, nodes: &[Node], i: usize, open: &str, close: &str) 
             edits.replace(node.span.clone(), open.to_string());
             edits.replace(nodes[c].span.clone(), close.to_string());
         }
-        // Self-closing or unclosed: there is only the one tag to deal with.
-        None => edits.replace(node.span.clone(), open.to_string()),
+        // Self-closing or unclosed: one tag to replace, but the replacement
+        // still has to be a whole element. Writing only `open` here emitted an
+        // unclosed `<span>` for the real `<a id="page_viii"/>` inside another
+        // anchor, and turned two content-model errors into two fatal ones.
+        None => edits.replace(node.span.clone(), format!("{open}{close}")),
     }
 }
 
