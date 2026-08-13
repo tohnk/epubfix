@@ -59,7 +59,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
 | `guide-references` | OPF-032, RSC-005 | drops OPF `guide` entries pointing at something that is not a content document, and the whole `<guide>` when that empties it |
 | `orphan-links` | RSC-007 | repoints a link whose anchor was discarded at the heading its own text names |
-| `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead `<link>`/`<script>` includes, and an `<img>` whose file is proven absent — never an `<a>` |
+| `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead `<link>`/`<script>` includes, an `<img>` whose file is proven absent, and the `href` of an `<a>` that cannot resolve — the `<a>` itself, its text and its id always stay |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
 | `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
 | `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment — and unlinks a same-document one with nothing left to point at |
@@ -327,6 +327,39 @@ now tracks the open stack and fails at EOF with anything left on it, and
 among the document passes, because the guard protects a file that parsed
 *before* a pass ran: a document that arrives malformed is the one file every
 other fixer would otherwise edit unprotected.
+
+### A link that cannot resolve stops claiming it can
+
+An `<a>` used to be the one thing this never touched: it carries navigation, and
+`dangling-resources` reported it instead. That was too absolute, for the same
+reason it was too absolute for `<img>`.
+
+`Resolution::Missing` is not a suspicion. It comes back only after five candidate
+resolutions have failed — the path as written, read from the archive root, read
+from the package directory, the unique longest matching suffix, and the same
+ignoring case. By then the file is in the archive under no path, spelling or
+case, and the link is dead however anyone looks at it. Keeping the `href`
+preserves nothing except the appearance of a working link.
+
+So the `href` goes and everything else stays: the element, its text, its class,
+and any `id` something else may point at. Measured, `<a>` with no href is clean
+under both rulesets. Every target is named in the report, and the reason is
+given, because the two are different:
+
+* **The target was never a filename.** Two Eddings volumes carry
+  `<a href="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX">`, a placeholder a converter
+  never filled in; *Rise of the Horde* has `%EF%BF%BD%EF%BF%BD`, two U+FFFD
+  replacement characters — the name was already mojibake when it was written, so
+  there is nothing any search could find. Measured: epubcheck treats both as an
+  ordinary missing relative path, not as a fragment.
+* **The file is genuinely gone**, after the search above.
+
+Two guards keep this from eating a table of contents. `orphan-links` runs first
+and gets the refusal, so a Word bookmark whose text names exactly one heading in
+the book is repointed at that heading rather than unlinked — all ten of *Girl
+With Curious Hair*'s story links still resolve. And a link into a *document* that
+exists takes the repointing path long before this one. Across the sixteen books
+here, the new rule fires on none of them.
 
 ### Derived declarations come last
 

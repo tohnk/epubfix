@@ -1642,12 +1642,52 @@ fn an_image_that_resolves_elsewhere_is_repointed_not_removed() {
     );
 }
 
-/// `<a>` is not covered by the policy revision: it carries navigation.
+/// An `<a>` is never removed — the text and any id stay — but its href goes.
+/// By the time the resolver says `Missing`, five candidate resolutions have
+/// failed and the file is in the archive under no path, spelling or case, so
+/// the link is dead whatever anyone does with it. Measured: `<a>` with no href
+/// is clean in both rulesets.
 #[test]
-fn a_dead_hyperlink_is_still_reported_rather_than_removed() {
+fn a_dead_hyperlink_keeps_its_text_and_loses_its_href() {
     let (outcome, after) = fix(&book_img(r#"<p><a href="gone.xhtml">chapter</a></p>"#));
-    assert!(ch1(&after).contains("gone.xhtml"), "got {}", ch1(&after));
-    assert!(!outcome.findings.is_empty(), "got {:?}", outcome.findings);
+    let got = ch1(&after);
+    assert!(!got.contains("gone.xhtml"), "got {got}");
+    assert!(got.contains("<a>chapter</a>"), "got {got}");
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("unlinked") && c.contains("gone.xhtml")),
+        "the target is named, so nothing goes quietly: {:?}",
+        outcome.changes
+    );
+}
+
+/// A target that could never have been a filename is unlinked for a different
+/// reason, and says so. Two Eddings volumes carry a placeholder a converter
+/// never filled in; *Rise of the Horde* has a name that was already mojibake
+/// when it was written.
+#[test]
+fn a_link_whose_target_was_never_a_filename_says_so() {
+    for (href, text) in [
+        ("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", "Chapter One"),
+        ("%EF%BF%BD%EF%BF%BD", "Prologue"),
+    ] {
+        let (outcome, after) = fix(&book_img(&format!(
+            r#"<p><a href="{href}" class="c">{text}</a></p>"#
+        )));
+        let got = ch1(&after);
+        assert!(!got.contains(href), "{href}: got {got}");
+        assert!(got.contains(&format!(r#"<a class="c">{text}</a>"#)), "{href}: got {got}");
+        assert!(
+            outcome
+                .changes
+                .iter()
+                .any(|c| c.contains("never a filename")),
+            "{href}: got {:?}",
+            outcome.changes
+        );
+    }
 }
 
 #[test]
@@ -1890,12 +1930,15 @@ fn an_ambiguous_heading_is_reported_rather_than_guessed_at() {
         r#"<h1 id="b">LYNDON</h1><p>two</p>"#,
     ));
 
-    assert!(ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
+    // orphan-links declines, so the reader is told which two headings clash —
+    // and the dead href still goes, since nothing can make it resolve.
     assert!(
         outcome.findings.iter().any(|f| f.contains("2 headings")),
         "got {:?}",
         outcome.findings
     );
+    assert!(!ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
+    assert!(ch1(&after).contains(">LYNDON</a>"), "got {}", ch1(&after));
 }
 
 /// Fire on the observed error. A link that already lands somewhere is not this
@@ -1920,11 +1963,19 @@ fn a_broken_link_matching_no_heading_is_still_reported() {
         r#"<h1 id="a">LYNDON</h1><p>one</p>"#,
         r#"<h1 id="b">JOHN BILLY</h1><p>two</p>"#,
     ));
-    assert!(ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
+    // orphan-links has nothing to aim at, so the bookmark is unlinked and
+    // named — the contents line still reads, it just no longer pretends to go
+    // anywhere.
     assert!(
-        outcome.findings.iter().any(|f| f.contains("_Toc1")),
+        outcome.changes.iter().any(|c| c.contains("_Toc1")),
         "got {:?}",
-        outcome.findings
+        outcome.changes
+    );
+    assert!(!ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
+    assert!(
+        ch1(&after).contains(">SOMETHING ELSE ENTIRELY</a>"),
+        "got {}",
+        ch1(&after)
     );
 }
 
@@ -2711,16 +2762,18 @@ fn a_dead_link_is_removed_whatever_its_rel_says() {
     );
 }
 
-/// An `<a>` still does carry content, so the wording that was wrong for a
-/// `<link>` is right here.
+/// Neither element is reported as "carrying content" any more — a `<link>`
+/// never did, and an `<a>` is now repaired rather than handed back. What has to
+/// stay true is that the `<a>`'s content survives the repair.
 #[test]
-fn a_dead_hyperlink_is_still_described_as_carrying_content() {
-    let (outcome, _) = fix(&book2(r#"<p><a href="gone.xhtml">chapter</a></p>"#));
+fn a_dead_hyperlink_is_repaired_rather_than_handed_back() {
+    let (outcome, after) = fix(&book2(r#"<p><a href="gone.xhtml">chapter</a></p>"#));
     assert!(
-        outcome.findings.iter().any(|f| f.contains("carries content")),
+        !outcome.findings.iter().any(|f| f.contains("carries content")),
         "got {:?}",
         outcome.findings
     );
+    assert!(ch1(&after).contains(">chapter</a>"), "got {}", ch1(&after));
 }
 
 

@@ -54,9 +54,21 @@ fn is_pure_include(node: &Node) -> bool {
 ///   leaves 100 `<link>`s behind; Kobo leaves a `<script src="kobo.js">` with no
 ///   script. Those elements contribute nothing but the reference, so they go.
 ///
-/// An `<a>` still never goes: it carries navigation, and its absence is a
-/// defect to report rather than paper over. An `<img>` used to be treated the
-/// same way, which was too absolute — see [`DanglingResources::images`].
+/// An `<a>` is never *removed* — it carries text a reader can see, and any id
+/// something may link to — but it does lose its `href`. That is a change from
+/// "report it and leave it alone", and the argument is the one that settled the
+/// `<img>` case: by the time [`Resolution::Missing`] comes back, five candidate
+/// resolutions have failed and the file is not in the archive under any path,
+/// spelling or case. The link is dead whatever anyone does with it. Keeping the
+/// `href` preserves nothing but the appearance of a working link, and the
+/// element, its text, its class and its id all stay — measured, `<a>` without an
+/// href is clean in both rulesets.
+///
+/// Three books made the case. Two Eddings volumes and a *Rise of the Horde*
+/// carry a link whose target was never a filename at all — see
+/// [`looks_like_a_filename`] — and those are the clearest, since there is
+/// nothing to look for. The report says which of the two reasons applied and
+/// names the targets, so nothing goes quietly.
 pub struct DanglingResources {
     /// Delete an `<img>` whose file is proven absent, rather than reporting it.
     ///
@@ -78,6 +90,58 @@ pub struct DanglingResources {
 impl Default for DanglingResources {
     fn default() -> Self {
         DanglingResources { images: true }
+    }
+}
+
+/// Could this target ever have named a file?
+///
+/// Used only to say *why* an anchor was unlinked — both answers unlink — so a
+/// wrong call costs a word in a report and nothing else.
+///
+/// Three books in the library have a link that was never a path at all. Two
+/// Eddings volumes carry `<a href="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX">`, a
+/// placeholder some converter never filled in; *Rise of the Horde* has
+/// `%EF%BF%BD%EF%BF%BD`, which decodes to two U+FFFD replacement characters —
+/// the name was already mojibake when it was written, so the original bytes are
+/// gone and no search can find them.
+///
+/// Measured: epubcheck treats all three exactly like any other missing file,
+/// `RSC-007` against a relative path. There is no reading in which a run of
+/// `X`s is a fragment something resolves.
+fn looks_like_a_filename(target: &str) -> bool {
+    let leaf = basename(target);
+    // U+FFFD is the decoder's way of saying the bytes were unrecoverable.
+    if leaf.contains('\u{FFFD}') {
+        return false;
+    }
+    // One character repeated is a placeholder, not a name.
+    let mut chars = leaf.chars();
+    if let Some(first) = chars.next()
+        && leaf.chars().count() >= 8
+        && chars.all(|c| c == first)
+    {
+        return false;
+    }
+    // Everything a reading system can open has an extension.
+    matches!(leaf.rsplit_once('.'), Some((stem, ext))
+        if !stem.is_empty()
+            && (1..=5).contains(&ext.chars().count())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// The first few of `items`, so one line stays one line on a book with seventy.
+fn sample(items: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let mut seen: Vec<&String> = Vec::new();
+    for i in items {
+        if !seen.contains(&i) {
+            seen.push(i);
+        }
+    }
+    let head: Vec<&str> = seen.iter().take(SHOWN).map(|s| s.as_str()).collect();
+    match seen.len().saturating_sub(SHOWN) {
+        0 => head.join(", "),
+        n => format!("{}, and {n} more", head.join(", ")),
     }
 }
 
@@ -150,6 +214,10 @@ impl Fixer for DanglingResources {
         let resolver = Resolver::new(book);
 
         let (mut repointed, mut dropped) = (0u32, 0u32);
+        // Unlinked anchors, split by why: a name that was never a filename, and
+        // a filename whose file is genuinely gone.
+        let (mut never, mut gone): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+
         for doc in book.markup_names() {
             let Some(text) = book.text(&doc).map(str::to_owned) else {
                 continue;
@@ -199,6 +267,15 @@ impl Fixer for DanglingResources {
                                         .map_or(String::new(), |a| format!(" (\"{}\")", a.value)),
                                     if wrapper { ", and its empty wrapper" } else { "" }
                                 ));
+                            } else if node.name == "a" && attr.name == "href" {
+                                let literal = resolve_href(&doc, &attr.value)
+                                    .map_or_else(|| attr.value.clone(), |(t, _)| t);
+                                if looks_like_a_filename(&literal) {
+                                    gone.push(attr.value.clone());
+                                } else {
+                                    never.push(attr.value.clone());
+                                }
+                                edits.delete(attr.span_with_space.clone());
                             } else {
                                 outcome.push_finding(format!(
                                     "{}: <{}> points at \"{}\", which is not in the book and has \
@@ -218,6 +295,7 @@ impl Fixer for DanglingResources {
             }
         }
 
+        report_unlinked(&mut outcome, &never, &gone);
         if repointed > 0 {
             outcome.push_change(format!(
                 "repointed {repointed} reference(s) at the moved file"
@@ -229,6 +307,26 @@ impl Fixer for DanglingResources {
             ));
         }
         outcome
+    }
+}
+
+/// One line per reason an anchor lost its href, each naming its targets.
+fn report_unlinked(outcome: &mut Outcome, never: &[String], gone: &[String]) {
+    if !never.is_empty() {
+        outcome.push_change(format!(
+            "unlinked {} <a> element(s) whose target was never a filename [{}], \
+             keeping the text and any id",
+            never.len(),
+            sample(never)
+        ));
+    }
+    if !gone.is_empty() {
+        outcome.push_change(format!(
+            "unlinked {} <a> element(s) whose file is not in the book under any path, \
+             spelling or case [{}], keeping the text and any id",
+            gone.len(),
+            sample(gone)
+        ));
     }
 }
 

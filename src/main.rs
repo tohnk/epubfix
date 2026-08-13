@@ -242,12 +242,26 @@ fn report_section(heading: &str, entries: &[(String, Vec<String>)]) {
 /// link it left behind. Both are right; printing both is the same defect twice.
 /// Matching on the last path segment is enough, since the two describe it
 /// differently ("images/logo.jpg" against "OEBPS/images/logo.jpg").
+///
+/// They can also differ in *spelling*, which is what made a *Rise of the Horde*
+/// look worse than two books with the identical defect. A fixer quotes the href
+/// as the document writes it, `%EF%BF%BD%EF%BF%BD`; the scan quotes where it
+/// resolves to, which has been through the percent-decoder and reads `��`. The
+/// same reference, and no substring shared between them. So both sides are
+/// decoded before they are compared.
 fn already_explained(residual: &str, findings: &[String]) -> bool {
+    let decode = |s: &str| {
+        percent_encoding::percent_decode_str(s)
+            .decode_utf8_lossy()
+            .into_owned()
+    };
     residual
         .split('"')
         .nth(1)
-        .map(|target| target.rsplit('/').next().unwrap_or(target))
-        .is_some_and(|leaf| !leaf.is_empty() && findings.iter().any(|f| f.contains(leaf)))
+        .map(|target| decode(target.rsplit('/').next().unwrap_or(target)))
+        .is_some_and(|leaf| {
+            !leaf.is_empty() && findings.iter().any(|f| decode(f).contains(leaf.as_str()))
+        })
 }
 
 fn default_dir() -> PathBuf {
@@ -394,5 +408,46 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(3)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::already_explained;
+
+    #[test]
+    fn a_residual_and_a_finding_about_one_file_are_one_defect() {
+        let findings = vec!["logo.jpg: 1 image(s) have no alt text".to_string()];
+        assert!(already_explained(
+            r#"ch1.xhtml: link to missing file "OEBPS/images/logo.jpg""#,
+            &findings
+        ));
+        assert!(!already_explained(
+            r#"ch1.xhtml: link to missing file "OEBPS/images/other.jpg""#,
+            &findings
+        ));
+    }
+
+    /// The two sides can describe the same reference in different spellings: a
+    /// fixer quotes the href as written, the final scan quotes where it
+    /// resolves to, which has been percent-decoded on the way. *Rise of the
+    /// Horde* was listed twice for one defect because of it.
+    #[test]
+    fn the_same_reference_encoded_and_decoded_is_still_one_defect() {
+        let findings =
+            vec![r#"part2.xhtml: <a> points at "%EF%BF%BD%EF%BF%BD", which is not in the book"#
+                .to_string()];
+        assert!(already_explained(
+            "part2.xhtml: link to missing file \"text/\u{FFFD}\u{FFFD}\"",
+            &findings
+        ));
+    }
+
+    /// A residual naming no file at all must not match everything.
+    #[test]
+    fn a_residual_with_no_quoted_target_explains_nothing() {
+        let findings = vec!["something else entirely".to_string()];
+        assert!(!already_explained("no quoted target here", &findings));
+        assert!(!already_explained(r#"empty: """#, &findings));
     }
 }
