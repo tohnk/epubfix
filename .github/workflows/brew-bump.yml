@@ -12,7 +12,7 @@ jobs:
         uses: mislav/bump-homebrew-formula-action@v4
         with:
           # Your formula name in homebrew-tap (e.g., Formula/epubfix.rb or epubfix)
-          formula-name: epubfix.rb
+          formula-name: epubfix
           # The tap repo to push updates to
           homebrew-tap: tohnk/homebrew-tap
           # Optional: relative path inside homebrew-tap if not standard Formula/<name>.rb
