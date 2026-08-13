@@ -436,10 +436,30 @@ const CONTENT_TYPE: &str = "text/html; charset=utf-8";
 /// Measured, on the real markup: 0 errors as EPUB 2, `1 ERROR(RSC-005)` per
 /// document as EPUB 3, and clean once the value is corrected.
 ///
-/// The charset is the one part not rewritten blind. `charset=utf-8` is a claim
-/// about the bytes of the file, and a document declaring something else may
-/// genuinely be in that encoding — relabelling it would turn a wrong declaration
-/// into a wrong document. Those are reported.
+/// # The charset, and an argument that was the wrong way round
+///
+/// This used to refuse a declaration naming any other encoding, on the grounds
+/// that `charset=` is a claim about the bytes and relabelling one would turn a
+/// wrong declaration into a wrong document. That reasoning had the evidence
+/// backwards, and it cost 165 unrepaired findings across the library — 70 of
+/// them in one *Well of Ascension*, which declares `charset=windows-1252` in
+/// every document.
+///
+/// [`Book::load`] decodes with `std::str::from_utf8`, which is strict: a file
+/// that is not valid UTF-8 (and not UTF-16, which is transcoded and recorded)
+/// never enters the text map at all, and no fixer ever sees it. So **every
+/// document this can be looking at is valid UTF-8 by construction**. The label
+/// is the only thing that disagrees with the bytes, and correcting it makes them
+/// agree rather than the reverse.
+///
+/// The real book settles it beyond the argument from types: those 70 documents
+/// each carry *both* `charset=utf-8` and `charset=windows-1252`, and the bytes
+/// they hold are `E2 80 94` — a UTF-8 em dash. Two independent declarations and
+/// the bytes themselves say UTF-8; one Calibre artefact says otherwise.
+///
+/// A pure-ASCII document is valid under both encodings and correct under
+/// either, so nothing is at stake there. And a document whose bytes really were
+/// windows-1252 could not have been decoded to reach this point.
 pub struct ContentTypeMeta;
 
 impl Fixer for ContentTypeMeta {
@@ -459,6 +479,9 @@ impl Fixer for ContentTypeMeta {
             return outcome;
         }
         let mut fixed = 0u32;
+        // Encodings a declaration claimed and the bytes did not have, named in
+        // the report because relabelling a file is worth saying out loud.
+        let mut relabelled: Vec<String> = Vec::new();
 
         for doc in book.markup_names() {
             let Some(text) = book.text(&doc).map(str::to_owned) else {
@@ -487,25 +510,21 @@ impl Fixer for ContentTypeMeta {
                 if value.split_whitespace().collect::<Vec<_>>().join(" ") == CONTENT_TYPE {
                     continue;
                 }
-                // The declared charset, if it declares one.
+                // Whatever the charset says, the bytes are UTF-8: nothing else
+                // survives `Book::load`. So the label is what is wrong.
                 let charset = value
                     .split(';')
                     .skip(1)
                     .filter_map(|p| p.trim().strip_prefix("charset="))
                     .map(|c| c.trim().trim_matches('"').to_string())
                     .next();
-                match charset.as_deref() {
-                    None | Some("utf-8" | "utf8") => {
-                        edits.replace(content.span.clone(), format!("content=\"{CONTENT_TYPE}\""));
-                        fixed += 1;
-                    }
-                    Some(other) => outcome.push_finding(format!(
-                        "{}: the encoding declaration says charset={other}, and EPUB requires \
-                         UTF-8; rewriting the label would leave a document whose declaration \
-                         and bytes disagree, so it needs converting first",
-                        basename(&doc)
-                    )),
+                if let Some(other) = charset.as_deref()
+                    && !matches!(other, "utf-8" | "utf8")
+                {
+                    relabelled.push(other.to_string());
                 }
+                edits.replace(content.span.clone(), format!("content=\"{CONTENT_TYPE}\""));
+                fixed += 1;
             }
 
             if !edits.is_empty() {
@@ -514,8 +533,19 @@ impl Fixer for ContentTypeMeta {
         }
 
         if fixed > 0 {
+            relabelled.sort();
+            relabelled.dedup();
+            let named = if relabelled.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({} of them claimed [{}], which the bytes are not)",
+                    fixed,
+                    relabelled.join(", ")
+                )
+            };
             outcome.push_change(format!(
-                "corrected {fixed} <meta> encoding declaration(s) to \"{CONTENT_TYPE}\""
+                "corrected {fixed} <meta> encoding declaration(s) to \"{CONTENT_TYPE}\"{named}"
             ));
         }
         outcome

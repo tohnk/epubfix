@@ -3058,24 +3058,34 @@ fn a_wrong_encoding_declaration_is_left_alone_under_epub2() {
     assert!(ch1(&after).contains("1999/xhtml; charset"), "got {}", ch1(&after));
 }
 
-/// `charset=` is a claim about the bytes of the file. Relabelling one that says
-/// something else would turn a wrong declaration into a wrong document.
+/// A declaration naming any other encoding is corrected, not reported.
+///
+/// `Book::load` decodes with strict `from_utf8`, so a document a fixer can see
+/// is valid UTF-8 by construction — a `charset=iso-8859-1` label on it is the
+/// only thing disagreeing with the bytes, and correcting it makes them agree.
+/// This used to be argued the other way round and cost 165 unrepaired findings.
 #[test]
-fn an_encoding_declaration_naming_another_charset_is_reported() {
+fn an_encoding_declaration_naming_another_charset_is_corrected_and_named() {
     let meta = r#"<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1"/>"#;
-    let body = doc("<p>text</p>").replace("<head>", &format!("<head>{meta}"));
+    // Real non-ASCII, so the document could not have been anything but UTF-8.
+    let body = doc("<p>an em dash \u{2014} here</p>").replace("<head>", &format!("<head>{meta}"));
     let (outcome, after) = fix(&make_epub(&[
         ("META-INF/container.xml", CONTAINER.as_bytes()),
         ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
         ("OEBPS/ch1.xhtml", body.as_bytes()),
     ]));
 
+    let got = ch1(&after);
+    assert!(!got.contains("iso-8859-1"), "got {got}");
+    assert!(got.contains(r#"content="text/html; charset=utf-8""#), "got {got}");
+    assert!(got.contains('\u{2014}'), "the text is untouched: {got}");
+    // The relabelling is named, since rewriting an encoding claim is worth
+    // saying out loud even when it is certainly right.
     assert!(
-        outcome.findings.iter().any(|f| f.contains("iso-8859-1")),
+        outcome.changes.iter().any(|c| c.contains("iso-8859-1")),
         "got {:?}",
-        outcome.findings
+        outcome.changes
     );
-    assert!(ch1(&after).contains("iso-8859-1"), "got {}", ch1(&after));
 }
 
 // ---------------------------------------------------------------------------
@@ -3396,4 +3406,143 @@ fn nav_points_without_an_id_are_given_one_and_the_rest_keep_theirs() {
         "got {:?}",
         outcome.changes
     );
+}
+
+// ---------------------------------------------------------------------------
+// css-prohibited
+// ---------------------------------------------------------------------------
+
+/// A book whose one stylesheet is `css`, linked from the chapter.
+fn book_css(css: &str, version: &str) -> Vec<u8> {
+    let opf = opf(
+        version,
+        r#"    <item id="css" href="s.css" media-type="text/css"/>"#,
+        "",
+        "",
+    );
+    let ch1 = doc("<p>text</p>").replace(
+        "</head>",
+        r#"<link rel="stylesheet" type="text/css" href="s.css"/></head>"#,
+    );
+    let mut files: Vec<(&str, &[u8])> = vec![
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/s.css", css.as_bytes()),
+    ];
+    if version == "2.0" {
+        files.push(("OEBPS/toc.ncx", NCX.as_bytes()));
+    }
+    make_epub(&files)
+}
+
+/// CSS-001: EPUB 3 forbids the bidi properties in a style sheet, because a
+/// reading system needs them expressed in the markup. A Calibre stylesheet
+/// writes `direction: ltr` beside every rule, which is the CSS initial value
+/// and therefore a no-op — 51 of them in one *1984*.
+#[test]
+fn a_bidi_declaration_setting_the_default_is_removed_under_epub3() {
+    let css = "p.a { direction: ltr; margin: 0 }\np.b { color: red; direction: ltr }\n";
+    let (outcome, after) = fix(&book_css(css, "3.0"));
+
+    let got = entry(&after, "OEBPS/s.css");
+    assert!(!got.contains("direction"), "got {got}");
+    // Everything around it survives, including the rule that had nothing else.
+    assert!(got.contains("margin: 0"), "got {got}");
+    assert!(got.contains("color: red"), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("bidi")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// EPUB 2 does not check, and a declaration that is not an error is not this
+/// tool's to delete.
+#[test]
+fn a_bidi_declaration_is_left_alone_under_epub2() {
+    let css = "p.a { direction: ltr; margin: 0 }\n";
+    let (_, after) = roundtrip_kept(&book_css(css, "2.0"));
+    assert!(
+        entry(&after, "OEBPS/s.css").contains("direction: ltr"),
+        "got {}",
+        entry(&after, "OEBPS/s.css")
+    );
+}
+
+/// A value that is *not* the default is doing something: the text depends on
+/// it, and moving it onto the elements needs knowing what the selector matches.
+#[test]
+fn a_meaningful_bidi_declaration_is_reported_rather_than_dropped() {
+    let css = "p.a { direction: rtl; margin: 0 }\n";
+    let (outcome, after) = fix(&book_css(css, "3.0"));
+
+    assert!(
+        entry(&after, "OEBPS/s.css").contains("direction: rtl"),
+        "got {}",
+        entry(&after, "OEBPS/s.css")
+    );
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("rtl")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+// ---------------------------------------------------------------------------
+// column-groups
+// ---------------------------------------------------------------------------
+
+/// RSC-005: XHTML 1.1 lets `<col>` sit directly in a `<table>`; HTML5 wants it
+/// inside a `<colgroup>`, so a retagged book meets the error for the first time.
+#[test]
+fn bare_col_elements_are_wrapped_in_a_colgroup_under_epub3() {
+    let body = r#"<table><col style="width: 54px"/><col style="width: 270px"/><tr><td>x</td></tr></table>"#;
+    let opf = opf("3.0", "", "", "");
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+    ]));
+
+    let got = ch1(&after);
+    assert!(
+        got.contains(r#"<table><colgroup><col style="width: 54px"/><col style="width: 270px"/></colgroup><tr>"#),
+        "got {got}"
+    );
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("colgroup")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// A `<col>` already inside a `<colgroup>` is where it belongs.
+#[test]
+fn a_col_already_in_a_colgroup_is_left_alone() {
+    let body = r#"<table><colgroup><col/></colgroup><tr><td>x</td></tr></table>"#;
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+    ]));
+    assert_eq!(ch1(&after).matches("<colgroup>").count(), 1, "got {}", ch1(&after));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("colgroup")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// EPUB 2 permits it, so nothing happens there.
+#[test]
+fn a_bare_col_is_left_alone_under_epub2() {
+    let body = r#"<table><col/><tr><td>x</td></tr></table>"#;
+    let (_, after) = roundtrip_kept(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+    ]));
+    assert!(!ch1(&after).contains("colgroup"), "got {}", ch1(&after));
 }

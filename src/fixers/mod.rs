@@ -21,6 +21,7 @@ use crate::book::Book;
 pub mod anchors;
 pub mod attrs;
 pub mod css_paths;
+pub mod css_rules;
 pub mod documents;
 pub mod filenames;
 pub mod ids;
@@ -159,6 +160,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(legacy_html::ImgAlt),
         Box::new(nesting::NestedAnchors),
         Box::new(nesting::MisplacedBlockquotes),
+        Box::new(nesting::ColumnGroups),
         Box::new(nesting::InlineInBlock),
         Box::new(anchors::MisplacedAnchors),
         // Before dangling-resources, which can recover a link this would only
@@ -171,6 +173,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
             images: !opts.keep_missing_images,
         }),
         Box::new(css_paths::CssPaths),
+        Box::new(css_rules::ProhibitedProperties),
         Box::new(resources::BrokenFragments),
         Box::new(resources::ReferenceFragments),
         Box::new(resources::DeadSchemes),

@@ -42,7 +42,9 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
 | `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
 | `head-content` | RSC-005 | removes empty elements a `<head>` may not hold, and reports any carrying text |
-| `content-type-meta` | RSC-005 | corrects the `<meta http-equiv="content-type">` value HTML5 fixes, which XHTML 1.1 never checked |
+| `content-type-meta` | RSC-005 | corrects the `<meta http-equiv="content-type">` value HTML5 fixes, which XHTML 1.1 never checked, charset included |
+| `css-prohibited` | CSS-001 | remove the bidi properties an EPUB style sheet may not contain |
+| `column-groups` | RSC-005 | put a bare `<col>` inside the `<colgroup>` HTML5 requires |
 | `truncated-documents` | RSC-016 | closes the elements a document left open when it stopped mid-air |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `anchor-names` | RSC-005 | replaces the `name` attribute XHTML 1.1 removed from `<a>` with the `id` it stood for |
@@ -383,6 +385,51 @@ anyone to choose from, and it is unlinked.
 The reserved link is also reported *once*. The pass that reserved it has already
 explained the problem, so the later pass that steps around it says nothing,
 rather than printing the same defect twice under a different heading.
+
+### Retagging is the strictest thing this tool does
+
+`--migrate-epub3` moves a book into a ruleset that checks more, so every defect
+only EPUB 3 objects to arrives at once. Measured on three real books, before any
+of the fixers below existed:
+
+| | as found | default | `--migrate-epub3` |
+| --- | --- | --- | --- |
+| *1984* | 42 | 0 | **51** |
+| *The Well of Ascension* | 722 | 0 | **83** |
+
+Nothing was being corrupted — every one of those errors was already in the book
+and EPUB 2 simply never asked. But a flag that takes a book from 0 errors to 83
+is not usable, and "they were already there" is no comfort to someone whose
+library got worse. Three classes accounted for all of it:
+
+* **`direction: ltr` in a stylesheet** (51 + 7). Prohibited outright in EPUB 3,
+  invisible in EPUB 2. Every occurrence in the library sets the CSS *initial*
+  value, so removing them is provably a no-op — see `css-prohibited`.
+* **`charset=windows-1252`** in the encoding declaration (70). See below.
+* **`<col>` directly inside `<table>`** (6), which XHTML 1.1 allows and HTML5
+  does not — see `column-groups`.
+
+With those three, both books migrate to 0.
+
+### The bytes decide the encoding, not the label
+
+`content-type-meta` used to refuse any charset but UTF-8, reasoning that
+`charset=` is a claim about the bytes and relabelling one would turn a wrong
+declaration into a wrong document. That had the evidence backwards, and it cost
+165 unrepaired findings across the library.
+
+[`Book::load`] decodes with `std::str::from_utf8`, which is strict. A file that
+is not valid UTF-8 — and not UTF-16, which is transcoded and recorded — never
+enters the text map, and no fixer ever sees it. So every document this can be
+looking at **is** UTF-8, by construction, and the label is the only thing
+disagreeing with the bytes.
+
+The real book settles it past the argument from types. *The Well of Ascension*
+declares `charset=utf-8` **and** `charset=windows-1252` in each of its 70
+documents, and the bytes they hold are `E2 80 94` — a UTF-8 em dash. Two
+declarations and the bytes themselves say UTF-8; one Calibre artefact says
+otherwise. The relabelling is named in the report, because rewriting an encoding
+claim is worth saying out loud even when it is certainly right.
 
 ### Derived declarations come last
 

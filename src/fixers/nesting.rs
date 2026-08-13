@@ -491,3 +491,80 @@ impl Fixer for InlineInBlock {
         ))
     }
 }
+
+/// RSC-005: `element "col" not allowed here; expected … "colgroup" … or "tr"`.
+///
+/// XHTML 1.1 lets `<col>` sit directly inside `<table>`; HTML5 does not, and
+/// requires it inside a `<colgroup>`. So this is the mirror of the fixers in
+/// [`crate::fixers::legacy_html`]: EPUB 3 is the stricter ruleset here, and a
+/// book only meets the error on being retagged.
+///
+/// A Gollancz *Well of Ascension* writes
+/// `<table><col/><col/><col/><tr>…`, three column definitions and no group.
+/// Wrapping the run in a `<colgroup>` is the whole repair: a `<colgroup>` with
+/// explicit `<col>` children has exactly the effect its children had on their
+/// own, so no column width moves.
+///
+/// Only a run that starts immediately inside the `<table>`. A `<col>` already
+/// inside a `<colgroup>` is where it belongs, and one somewhere else entirely is
+/// damage this should not try to reason about.
+pub struct ColumnGroups;
+
+impl Fixer for ColumnGroups {
+    fn name(&self) -> &'static str {
+        "column-groups"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "put a bare <col> inside the <colgroup> HTML5 requires"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        if book.epub_version() < 3 {
+            return Outcome::none();
+        }
+        let mut wrapped = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for (i, table) in nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.name == "table" && n.kind == NodeKind::Start)
+            {
+                // The run of <col> children, in document order. A gap ends it:
+                // only the ones opening the table are this fixer's business.
+                let cols: Vec<&Node> = nodes
+                    .iter()
+                    .filter(|n| n.parent == Some(i) && n.kind != NodeKind::End)
+                    .take_while(|n| n.name == "col")
+                    .collect();
+                let (Some(first), Some(last)) = (cols.first(), cols.last()) else {
+                    continue;
+                };
+                edits.insert(first.span.start, "<colgroup>".to_string());
+                edits.insert(last.element_span(&nodes).end, "</colgroup>".to_string());
+                wrapped += u32::try_from(cols.len()).unwrap_or(u32::MAX);
+                let _ = table;
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if wrapped == 0 {
+            return Outcome::none();
+        }
+        Outcome::change(format!(
+            "put {wrapped} bare <col> element(s) inside the <colgroup> HTML5 requires"
+        ))
+    }
+}
