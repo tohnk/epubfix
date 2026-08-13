@@ -154,6 +154,10 @@ fn css_property(element: &str, attr: &str) -> Option<&'static str> {
     Some(match attr {
         "valign" => "vertical-align",
         "bgcolor" => "background-color",
+        // <body text="#000"> is the page's text colour and nothing else.
+        // `link`/`vlink`/`alink` are deliberately absent: those need `a:link`
+        // and `a:visited` selectors, which an inline style cannot express.
+        "text" => "color",
         "width" => "width",
         "height" => "height",
         "nowrap" => "white-space",
@@ -178,6 +182,7 @@ fn inline_style(element: &str, attr: &str, value: &str) -> Option<String> {
     Some(match attr {
         "valign" => format!("vertical-align: {v}"),
         "bgcolor" => format!("background-color: {v}"),
+        "text" => format!("color: {v}"),
         "nowrap" => "white-space: nowrap".to_string(),
         "width" | "height" => format!("{attr}: {}", length(v)?),
         "hspace" => format!("margin-left: {0}; margin-right: {0}", length(v)?),

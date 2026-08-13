@@ -23,11 +23,22 @@ fn ids(src: &str) -> Vec<String> {
     scan(src).map_or_else(
         |_| Vec::new(),
         |nodes| {
-            nodes
-                .iter()
-                .flat_map(id_attrs)
-                .map(|a| a.value.clone())
-                .collect()
+            let mut out = Vec::new();
+            for node in &nodes {
+                // An element's own `name` and `id` are one identity when they
+                // agree — the legacy `<a name="x" id="x">` — not two. Counting
+                // them separately reported 22 duplicates in a book epubcheck
+                // called clean, which is the worst kind of wrong: a report that
+                // sends someone looking for a defect that is not there.
+                let mut own: Vec<String> = Vec::new();
+                for attr in id_attrs(node) {
+                    if !own.contains(&attr.value) {
+                        own.push(attr.value.clone());
+                    }
+                }
+                out.extend(own);
+            }
+            out
         },
     )
 }

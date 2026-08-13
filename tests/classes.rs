@@ -2777,3 +2777,61 @@ fn a_book_past_the_threshold_is_retagged_rather_than_wrapped() {
         outcome.changes
     );
 }
+
+/// `<a name="x" id="x">` is one identity, and the closing scan must count it
+/// that way too.
+///
+/// Under EPUB 3 the `name` is legal and stays, so this pattern survives a run —
+/// and counting the two attributes separately reported 22 duplicate ids in a
+/// book epubcheck calls clean. A report that sends someone looking for a defect
+/// that is not there is worse than no report.
+#[test]
+fn a_matching_name_and_id_are_not_reported_as_a_duplicate() {
+    let before = common::epub3(
+        r#"<p><a name="TOC_id754016" id="TOC_id754016">anchor</a></p>"#,
+        "<p>y</p>",
+    );
+    let (outcome, _) = roundtrip_full(&before);
+    assert!(
+        !outcome.remaining.iter().any(|r| r.contains("duplicate id")),
+        "got {:?}",
+        outcome.remaining
+    );
+}
+
+/// A body's text colour does have a single-property equivalent, so it is
+/// rehoused rather than reported as unconvertible.
+#[test]
+fn a_body_text_colour_is_moved_into_css() {
+    let before = common::epub3_with_css("<p>text</p>", ".c { color: red }\n");
+    let patched: Vec<(String, Vec<u8>)> = read_epub(&before)
+        .into_iter()
+        .map(|(n, d)| {
+            if n == "OEBPS/ch1.xhtml" {
+                let t = String::from_utf8(d)
+                    .unwrap()
+                    .replace("<body>", r##"<body text="#123456">"##);
+                (n, t.into_bytes())
+            } else {
+                (n, d)
+            }
+        })
+        .collect();
+    let rebuilt: Vec<(&str, &[u8])> = patched
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
+    let (outcome, after) = roundtrip_full(&make_epub(&rebuilt));
+
+    let got = entry(&after, "OEBPS/ch1.xhtml");
+    assert!(got.contains("color: #123456"), "got {got}");
+    assert!(!got.contains("text="), "got {got}");
+    assert!(
+        !outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("no single-property") && f.contains("text")),
+        "got {:?}",
+        outcome.findings
+    );
+}
