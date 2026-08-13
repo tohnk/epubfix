@@ -294,6 +294,21 @@ pub fn line_span(src: &str, span: Range<usize>) -> Range<usize> {
 /// An EPUB content document is required to be XML, and one that is not is
 /// fatal: EPUB Check stops reading the file. Nothing else in this crate will
 /// notice, because every fixer skips what it cannot scan.
+///
+/// # Reaching the end is not the same as finishing
+///
+/// The reader's own checks catch a *mismatched* end tag and stop. They do not
+/// catch a document that simply runs out with elements still open: it reads to
+/// `Eof` and reports success. That is EPUB Check's `RSC-016`, "XML document
+/// structures must start and end within the same entity", and a real book in the
+/// library has exactly it — 78 lines and then nothing, no `</div>`, `</body>` or
+/// `</html>`.
+///
+/// This matters twice over, because the rollback guard in
+/// [`crate::fix_book_with`] asks this question to decide whether a pass damaged
+/// a file. A pass that deleted a closing tag would have sailed through it, which
+/// is the same shape of hole as an end tag being written into — this time in the
+/// safety net rather than a fixer.
 pub fn well_formed(src: &str) -> Result<(), ScanError> {
     let mut reader = Reader::from_str(src);
     let cfg = reader.config_mut();
@@ -302,9 +317,25 @@ pub fn well_formed(src: &str) -> Result<(), ScanError> {
     cfg.allow_dangling_amp = false;
     cfg.expand_empty_elements = false;
 
+    let mut open: Vec<String> = Vec::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Eof) => return Ok(()),
+            Ok(Event::Eof) => {
+                return match open.last() {
+                    None => Ok(()),
+                    Some(name) => Err(ScanError {
+                        position: src.len(),
+                        message: format!(
+                            "the document ends with <{name}> still open ({} element(s) unclosed)",
+                            open.len()
+                        ),
+                    }),
+                };
+            }
+            Ok(Event::Start(e)) => open.push(String::from_utf8_lossy(e.name().as_ref()).into_owned()),
+            Ok(Event::End(_)) => {
+                open.pop();
+            }
             Ok(_) => {}
             Err(e) => {
                 return Err(ScanError {

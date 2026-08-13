@@ -6,6 +6,7 @@
 
 pub mod verify;
 
+use std::fmt::Write as _;
 use std::io::{Cursor, Write};
 
 use epubfix::Book;
@@ -390,7 +391,28 @@ fn ends_with_any(name: &str, exts: &[&str]) -> bool {
 }
 
 fn build(v3: bool, ch1_body: &str, ch2_body: &str) -> Vec<u8> {
+    // Every image a body names goes into the archive *and* the manifest. A file
+    // the book uses and the package does not list is RSC-008 -- a real defect
+    // that `undeclared-resources` now repairs, so a fixture that skipped the
+    // manifest half was quietly asking for a change on every image test.
+    let mut declared = String::new();
+    for (i, p) in referenced_images(&[ch1_body, ch2_body]).iter().enumerate() {
+        {
+            let media = if p.to_ascii_lowercase().ends_with(".png") {
+                "image/png"
+            } else if p.to_ascii_lowercase().ends_with(".gif") {
+                "image/gif"
+            } else {
+                "image/jpeg"
+            };
+            let _ = writeln!(
+                declared,
+                "    <item id=\"img{i}\" href=\"{p}\" media-type=\"{media}\"/>"
+            );
+        }
+    }
     let opf = if v3 { opf3() } else { opf2() };
+    let opf = opf.replace("  </manifest>", &format!("{declared}  </manifest>"));
     let ch1 = chapter(ch1_body, v3);
     let ch2 = chapter(ch2_body, v3);
     let mut files: Vec<(&str, &[u8])> = vec![

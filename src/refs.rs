@@ -84,6 +84,43 @@ pub fn resolve_href(from: &str, href: &str) -> Option<(String, Option<String>)> 
     Some((target, fragment))
 }
 
+/// Every archive entry the book points at, from markup and stylesheets alike.
+///
+/// The manifest is deliberately not consulted: the question this answers is
+/// "does anything in the book *use* this file", and the manifest is the thing
+/// being checked against. Nor is it a defect index — a reference that lands
+/// nowhere simply contributes nothing here.
+pub fn referenced_targets(book: &crate::book::Book) -> HashSet<String> {
+    use crate::fixers::css_paths::{IMPORT_RE, URL_RE, unquote};
+
+    let mut out = HashSet::new();
+    for name in book.names() {
+        let Some(text) = book.text(name) else { continue };
+        let mut add = |raw: &str| {
+            if let Some((target, _)) = resolve_href(name, raw) {
+                out.insert(target);
+            }
+        };
+        if crate::util::ends_with_any(name, &[".css"]) {
+            for c in URL_RE.captures_iter(text) {
+                add(unquote(&c[1]));
+            }
+            for c in IMPORT_RE.captures_iter(text) {
+                if let Some(m) = c.get(1).or_else(|| c.get(2)) {
+                    add(unquote(m.as_str()));
+                }
+            }
+        } else {
+            for c in REF_RE.captures_iter(text) {
+                if let Some(m) = c.get(1).or_else(|| c.get(2)) {
+                    add(m.as_str());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every `(document, fragment)` pair the book links to.
 #[derive(Debug, Default)]
 pub struct ReferenceIndex {

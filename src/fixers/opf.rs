@@ -1,5 +1,6 @@
 //! Fixes that apply to the package document (`.opf`).
 
+use std::fmt::Write as _;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -8,8 +9,10 @@ use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
 use crate::language::{self, Policy};
 use crate::markup::{Edits, NodeKind, line_span, scan};
+use crate::fixers::filenames::as_url_path;
+use crate::paths::{Resolution, Resolver, relative_to};
 use crate::refs::resolve_href;
-use crate::util::{ends_with_any, is_bad_id, re};
+use crate::util::{basename, ends_with_any, is_bad_id, re};
 
 /// Read the OPF, hand it to `f`, and store the result if it changed.
 fn edit_opf(book: &mut Book, f: impl FnOnce(&str) -> String) -> bool {
@@ -244,6 +247,301 @@ impl Fixer for ManifestItems {
     }
 }
 
+/// OPF-031, RSC-001, RSC-007: a manifest item or guide reference whose file is
+/// not where the package says it is.
+///
+/// `dangling-resources` has resolved this class since the beginning, and could
+/// never see it here: it walks [`Book::markup_names`], and the package document
+/// is not markup. So the one file whose whole job is to say where things are was
+/// the one file nobody checked. Seventeen books in a 200-book library have a
+/// defect of this shape, and all of them came back "nothing I can fix".
+///
+/// The [`Resolver`] does the deciding, exactly as it does for a content
+/// document, and the answer is usually that the file is *there* and the path is
+/// wrong:
+///
+/// * An abbyy-to-epub build of *True Hallucinations* keeps its twenty chapters
+///   at the archive root. The manifest says `../chapter0001.html` and is right;
+///   the guide says `chapter0001.html` and is missing the `../`. Forty errors
+///   from one absent prefix.
+/// * A Calibre build of *Skylark* points its cover landmark at `cover.xhtml`
+///   when the file is `Text/cover.xhtml`.
+///
+/// This is worth being careful about, and the first version of it was not.
+/// Reading the epubcheck log alone, "not declared in manifest" *plus* "could not
+/// be found" for twenty chapters reads as a phantom apparatus to be swept away,
+/// and deleting the twenty manifest items and spine entries measures as a clean
+/// book — with twenty of its twenty-one documents unreachable. Only the archive
+/// listing shows what is really wrong. Hence: repointing is tried first and
+/// always wins, and removal happens only where [`Resolution::Missing`] says the
+/// file is in the archive under no path, spelling or case at all.
+///
+/// A removed `<item>` takes its `<itemref>` with it, since a spine entry naming
+/// an id that no longer exists is a new error in place of the old one. Structural
+/// items — the nav document, the NCX the spine names — are reported instead:
+/// they are required to exist, so their absence needs a person, not a deletion.
+pub struct PackageReferences;
+
+/// Is this manifest item one the book cannot simply lose?
+///
+/// Three ways to qualify, and the third is the one that matters most.
+///
+/// The nav document and the NCX the spine names are required to exist, so their
+/// absence needs a person rather than a deletion. And **anything in the spine is
+/// a document the reader was meant to read**: removing its entry takes it out of
+/// the reading order, which is content loss that validates perfectly clean. That
+/// is not a hypothetical — the first version of this fixer, working from the
+/// epubcheck log alone, would have swept twenty chapters of *True Hallucinations*
+/// out of the spine and reported a repaired book.
+///
+/// So a spine document whose file cannot be found is always reported. A
+/// stylesheet, font or script is not in the spine and can go.
+fn is_structural(node: &crate::markup::Node, spine_toc: &str, in_spine: &[String]) -> bool {
+    node.attr("properties")
+        .is_some_and(|p| p.value.split_whitespace().any(|w| w == "nav"))
+        || node.attr("id").is_some_and(|a| {
+            (!spine_toc.is_empty() && a.value == spine_toc) || in_spine.contains(&a.value)
+        })
+}
+
+impl Fixer for PackageReferences {
+    fn name(&self) -> &'static str {
+        "package-references"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["OPF-031", "RSC-001", "RSC-007"]
+    }
+    fn description(&self) -> &'static str {
+        "repoint manifest and guide hrefs whose file moved, and drop the ones with no file at all"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+        let resolver = Resolver::new(book);
+        let spine_toc = nodes
+            .iter()
+            .find(|n| n.name == "spine")
+            .and_then(|n| n.attr("toc"))
+            .map_or(String::new(), |a| a.value.clone());
+        let in_spine: Vec<String> = nodes
+            .iter()
+            .filter(|n| n.name == "itemref")
+            .filter_map(|n| n.attr("idref"))
+            .map(|a| a.value.clone())
+            .collect();
+
+        let mut outcome = Outcome::none();
+        let mut edits = Edits::new();
+        let (mut repointed, mut dropped) = (0u32, 0u32);
+
+        for node in nodes.iter().filter(|n| {
+            matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+                && matches!(n.name.as_str(), "item" | "reference")
+        }) {
+            let Some(href) = node.attr("href") else {
+                continue;
+            };
+            match resolver.resolve(&opf_name, &href.value) {
+                Resolution::Fine | Resolution::NotOurs => {}
+                Resolution::Moved { target } => {
+                    let rel = as_url_path(&relative_to(&opf_name, &target));
+                    edits.replace(href.span.clone(), format!("href=\"{rel}\""));
+                    repointed += 1;
+                }
+                Resolution::Ambiguous { count } => outcome.push_finding(format!(
+                    "<{}> in the package points at \"{}\", and {count} files share that name, \
+                     so there is no way to tell which was meant",
+                    node.name, href.value
+                )),
+                Resolution::Missing => {
+                    if node.name == "item" && is_structural(node, &spine_toc, &in_spine) {
+                        outcome.push_finding(format!(
+                            "the package needs \"{}\" — it is in the reading order, or it is the \
+                             book's table of contents — and no file of that name is in the book \
+                             under any path, spelling or case. Removing the entry would take a \
+                             document out of the book and leave a validator with nothing to \
+                             complain about, so it needs a person",
+                            href.value
+                        ));
+                        continue;
+                    }
+                    // No `<itemref>` can be left dangling by this: anything the
+                    // spine names took the branch above.
+                    edits.delete(line_span(&text, node.element_span(&nodes)));
+                    dropped += 1;
+                }
+            }
+        }
+
+        if repointed == 0 && dropped == 0 {
+            return outcome;
+        }
+        book.set_text(&opf_name, edits.apply(&text));
+        if repointed > 0 {
+            outcome.push_change(format!(
+                "repointed {repointed} package reference(s) at the file they name"
+            ));
+        }
+        if dropped > 0 {
+            outcome.push_change(format!(
+                "removed {dropped} package entr(ies) for files that are not in the book"
+            ));
+        }
+        outcome
+    }
+}
+
+/// RSC-008: `Referenced resource … is not declared in the OPF manifest`.
+///
+/// The mirror of [`PackageReferences`]: there the manifest names a file that is
+/// not in the archive, here the archive holds a file the manifest never mentions
+/// and something in the book uses. Both are the package document being out of
+/// step with the archive, and both are repaired by making it agree.
+///
+/// *Skylark* is the case, and it is one this tool created. Its stylesheet asks
+/// for `..Fonts/AGaramondPro-Regular.otf` — a missing slash — and `css-paths`
+/// corrects that to `../Fonts/…`, which exists. The font was undeclared all
+/// along; correcting the path is what let epubcheck reach it and say so. A
+/// repair that trades RSC-007 for RSC-008 is not a repair, so this finishes it.
+///
+/// Only files something actually references. A file nothing points at is not an
+/// error — epubcheck says nothing about it — and adding manifest entries for
+/// stray archive contents would be inventing work.
+pub struct UndeclaredResources;
+
+/// Media type by extension, for a file the manifest has to be told about.
+///
+/// Measured, on both rulesets: epubcheck does not check a font's declared type
+/// against its contents, and `application/vnd.ms-opentype`, `font/otf`,
+/// `application/x-font-ttf` and `application/font-sfnt` are all accepted for the
+/// same `.otf`. So the one entry both EPUB versions have always allowed is the
+/// one used, and there is no need for a version-dependent table.
+const BY_EXTENSION: &[(&str, &str)] = &[
+    (".xhtml", "application/xhtml+xml"),
+    (".html", "application/xhtml+xml"),
+    (".htm", "application/xhtml+xml"),
+    (".css", "text/css"),
+    (".jpg", "image/jpeg"),
+    (".jpeg", "image/jpeg"),
+    (".png", "image/png"),
+    (".gif", "image/gif"),
+    (".svg", "image/svg+xml"),
+    (".webp", "image/webp"),
+    (".otf", "application/vnd.ms-opentype"),
+    (".ttf", "application/vnd.ms-opentype"),
+    (".woff", "application/font-woff"),
+    (".woff2", "font/woff2"),
+    (".ncx", "application/x-dtbncx+xml"),
+    (".js", "application/javascript"),
+    (".mp3", "audio/mpeg"),
+    (".m4a", "audio/mp4"),
+    (".mp4", "video/mp4"),
+    (".smil", "application/smil+xml"),
+    (".pls", "application/pls+xml"),
+];
+
+impl Fixer for UndeclaredResources {
+    fn name(&self) -> &'static str {
+        "undeclared-resources"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-008"]
+    }
+    fn description(&self) -> &'static str {
+        "declare a file the book uses that the manifest never mentions"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+        let Some(manifest) = nodes
+            .iter()
+            .position(|n| n.name == "manifest" && n.kind == NodeKind::Start)
+        else {
+            return Outcome::none();
+        };
+        let Some(close) = nodes[manifest].close else {
+            return Outcome::none();
+        };
+
+        let declared: std::collections::HashSet<String> = nodes
+            .iter()
+            .filter(|n| n.name == "item")
+            .filter_map(|n| n.attr("href"))
+            .filter_map(|a| resolve_href(&opf_name, &a.value).map(|(t, _)| t))
+            .collect();
+        let mut taken: std::collections::HashSet<String> = nodes
+            .iter()
+            .filter_map(|n| n.attr("id"))
+            .map(|a| a.value.clone())
+            .collect();
+
+        let used = crate::refs::referenced_targets(book);
+        let mut outcome = Outcome::none();
+        let mut added: Vec<String> = Vec::new();
+        let mut items = String::new();
+        let indent = line_indent(&text, nodes[close].span.start);
+
+        for name in book.names() {
+            // The package cannot list itself, the OCF entries are outside it,
+            // and anything already declared is done.
+            if *name == opf_name
+                || name == "mimetype"
+                || name.starts_with("META-INF/")
+                || declared.contains(name)
+                || !used.contains(name)
+            {
+                continue;
+            }
+            let lower = name.to_ascii_lowercase();
+            let Some((_, media)) = BY_EXTENSION.iter().find(|(ext, _)| lower.ends_with(ext)) else {
+                outcome.push_finding(format!(
+                    "\"{name}\" is used by the book but not in the manifest, and its extension \
+                     names no media type this knows; declaring it with the wrong type would be \
+                     a worse error than leaving it undeclared"
+                ));
+                continue;
+            };
+            let id = crate::fixers::ids::unique_id(basename(name), &taken);
+            taken.insert(id.clone());
+            let href = as_url_path(&relative_to(&opf_name, name));
+            let _ = writeln!(
+                items,
+                "{indent}  <item id=\"{id}\" href=\"{href}\" media-type=\"{media}\"/>"
+            );
+            added.push(basename(name).to_string());
+        }
+
+        if added.is_empty() {
+            return outcome;
+        }
+        let mut edits = Edits::new();
+        edits.insert(line_span(&text, nodes[close].span.clone()).start, items);
+        book.set_text(&opf_name, edits.apply(&text));
+        outcome.push_change(format!(
+            "declared {} file(s) the book uses but the manifest did not list [{}]",
+            added.len(),
+            added.join(", ")
+        ));
+        outcome
+    }
+}
+
 /// OPF-032: `Guide references "…" which is not a valid "OPS Content Document"`.
 ///
 /// The `guide` is the EPUB 2 predecessor of the landmarks nav, and every
@@ -254,9 +552,21 @@ impl Fixer for ManifestItems {
 ///
 /// Only references that resolve to something which is not markup are removed.
 /// A reference to a missing file is a different defect with a different repair
-/// and is left to [`crate::fixers::resources::DanglingResources`]; a reference
-/// whose fragment does not exist is left to `BrokenFragments`. Both of those
-/// can recover the link, and deleting it first would take the chance away.
+/// and is left to [`PackageReferences`], which runs first; a reference whose
+/// fragment does not exist is left to `BrokenFragments`. Both of those can
+/// recover the link, and deleting it first would take the chance away.
+///
+/// # The guide may not be left empty
+///
+/// `<!ELEMENT guide (reference+)>` — one reference at minimum. So a book whose
+/// guide holds nothing but bad entries cannot simply have them removed:
+/// measured, that is `element "guide" incomplete`, one error traded for another,
+/// and the whole `<guide>` has to go with them. It is optional in EPUB 2 and
+/// gone in EPUB 3, so removing it costs nothing.
+///
+/// The check is unconditional rather than a tidy-up after this fixer's own
+/// deletions, because the emptying can happen anywhere — `PackageReferences`
+/// removing the last dead entry, or a book that simply arrived with `<guide/>`.
 pub struct GuideReferences;
 
 impl Fixer for GuideReferences {
@@ -264,7 +574,7 @@ impl Fixer for GuideReferences {
         "guide-references"
     }
     fn codes(&self) -> &'static [&'static str] {
-        &["OPF-032"]
+        &["OPF-032", "RSC-005"]
     }
     fn description(&self) -> &'static str {
         "drop guide entries pointing at something that is not a content document"
@@ -285,7 +595,16 @@ impl Fixer for GuideReferences {
         let mut edits = Edits::new();
         let mut dropped = 0u32;
 
-        for node in nodes.iter().filter(|n| n.name == "reference") {
+        let guide = nodes
+            .iter()
+            .position(|n| n.name == "guide" && n.kind == NodeKind::Start);
+        let mut references = 0u32;
+
+        for node in nodes
+            .iter()
+            .filter(|n| n.name == "reference" && matches!(n.kind, NodeKind::Start | NodeKind::Empty))
+        {
+            references += 1;
             let Some(href) = node.attr("href") else {
                 continue;
             };
@@ -299,6 +618,24 @@ impl Fixer for GuideReferences {
             }
             edits.delete(node.element_span(&nodes));
             dropped += 1;
+        }
+
+        // Nothing would be left inside it, so the element goes too — an empty
+        // <guide> is an error of its own.
+        if let Some(guide) = guide
+            && references == dropped
+        {
+            let mut edits = Edits::new();
+            edits.delete(line_span(&text, nodes[guide].element_span(&nodes)));
+            book.set_text(&opf_name, edits.apply(&text));
+            return Outcome::change(if dropped == 0 {
+                "removed an empty <guide>, which needs at least one reference".to_string()
+            } else {
+                format!(
+                    "removed the <guide> and all {dropped} of its references, none of which \
+                     pointed at a content document"
+                )
+            });
         }
 
         if dropped == 0 {

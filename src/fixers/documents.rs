@@ -34,9 +34,11 @@
 //! required under EPUB 2 — but it is valid in both and one code path is worth
 //! more than the saved element.
 
+use std::fmt::Write as _;
+
 use crate::book::Book;
 use crate::fixers::{Fixer, Outcome};
-use crate::markup::{Edits, Node, NodeKind, line_span, scan};
+use crate::markup::{Edits, Node, NodeKind, line_span, scan, well_formed};
 use crate::refs::resolve_href;
 use crate::util::{basename, dirname};
 
@@ -286,6 +288,124 @@ impl Fixer for FragmentDocuments {
                 "gave {boxed} document(s) the block container XHTML 1.1 requires inside <body>"
             ));
         }
+        outcome
+    }
+}
+
+/// Elements that never have an end tag, so one left open is not truncation.
+const VOID: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// FATAL RSC-016: `XML document structures must start and end within the same
+/// entity` — a file that simply stops.
+///
+/// An abbyy-to-epub build of *True Hallucinations* ends its only content
+/// document mid-air: 78 lines, the last one a complete `</p>`, and then nothing.
+/// No `</div>`, no `</body>`, no `</html>`. epubcheck reports the position as
+/// one byte past the end of the file, which is exactly what it is.
+///
+/// This matters more than one error suggests. A FATAL stops epubcheck reading
+/// the file at all, so every other defect in the book's only document is
+/// invisible behind it — and the same is true of this tool's own rollback guard,
+/// which protects a file that parsed *before* a pass ran. A document that
+/// arrives malformed has no such protection, so every later fixer edits it
+/// unguarded. That is why this runs first.
+///
+/// The repair adds no content: the missing end tags, innermost first, using each
+/// element's name exactly as written since XML is case-sensitive. Every reading
+/// system already renders the document this way — closing at EOF is what a
+/// recovering parser does — so nothing moves on the page.
+///
+/// Two things keep it honest. A void element left open is not truncation but a
+/// different defect (`<br>` where XHTML wants `<br/>`), and closing it would
+/// swallow the rest of the document, so that is reported rather than repaired.
+/// And the result is handed to [`well_formed`] before it is kept: if appending
+/// the tags does not actually produce a parseable document, the guess was wrong
+/// and nothing is written.
+pub struct TruncatedDocuments;
+
+impl Fixer for TruncatedDocuments {
+    fn name(&self) -> &'static str {
+        "truncated-documents"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-016"]
+    }
+    fn description(&self) -> &'static str {
+        "close the elements a document that stops mid-air left open"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let mut outcome = Outcome::none();
+        let mut closed = 0u32;
+
+        for name in book.names().to_vec() {
+            if !crate::util::ends_with_any(&name, crate::util::XML) {
+                continue;
+            }
+            let Some(text) = book.text(&name).map(str::to_owned) else {
+                continue;
+            };
+            // Fire on the observed error, not on a scan that happens to find an
+            // open element — the lenient scanner finds those in valid files too.
+            if well_formed(&text).is_ok() {
+                continue;
+            }
+            let Ok(nodes) = scan(&text) else { continue };
+
+            let unclosed: Vec<&Node> = nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Start && n.close.is_none())
+                .collect();
+            if unclosed.is_empty() {
+                continue;
+            }
+            if let Some(void) = unclosed.iter().find(|n| VOID.contains(&n.name.as_str())) {
+                outcome.push_finding(format!(
+                    "{}: <{}> is left open, which is a void element written without its slash \
+                     rather than a document that stops early; closing it would swallow \
+                     everything after it",
+                    basename(&name),
+                    void.name
+                ));
+                continue;
+            }
+
+            let mut fixed = text.clone();
+            if !fixed.ends_with('\n') {
+                fixed.push('\n');
+            }
+            for node in unclosed.iter().rev() {
+                let _ = writeln!(fixed, "</{}>", node.raw_name(&text));
+            }
+            // The guess has to parse, or it was the wrong guess.
+            if well_formed(&fixed).is_err() {
+                outcome.push_finding(format!(
+                    "{}: the document does not parse and closing the {} element(s) left open \
+                     does not fix it, so the damage is something else",
+                    basename(&name),
+                    unclosed.len()
+                ));
+                continue;
+            }
+            outcome.push_change(format!(
+                "{}: closed {} element(s) the document left open when it stopped [{}]",
+                basename(&name),
+                unclosed.len(),
+                unclosed
+                    .iter()
+                    .rev()
+                    .map(|n| n.raw_name(&text))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            book.set_text(&name, fixed);
+            closed += 1;
+        }
+
+        let _ = closed;
         outcome
     }
 }

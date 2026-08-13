@@ -30,13 +30,13 @@ use crate::paths::{Resolution, Resolver, relative_to};
 use crate::util::{basename, ends_with_any, re};
 
 /// A `url(...)` argument, with its quotes if it has any.
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| re(r"url\(\s*([^)]*?)\s*\)"));
+pub(crate) static URL_RE: LazyLock<Regex> = LazyLock::new(|| re(r"url\(\s*([^)]*?)\s*\)"));
 /// An `@import` statement, in either the `url(...)` or the bare-string form.
-static IMPORT_RE: LazyLock<Regex> =
+pub(crate) static IMPORT_RE: LazyLock<Regex> =
     LazyLock::new(|| re(r#"(?s)@import\s+(?:url\(\s*([^)]*?)\s*\)|("[^"]*"|'[^']*'))[^;]*;"#));
 
 /// Strip one level of matching quotes.
-fn unquote(v: &str) -> &str {
+pub(crate) fn unquote(v: &str) -> &str {
     let v = v.trim();
     for q in ['"', '\''] {
         if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {

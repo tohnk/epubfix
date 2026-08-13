@@ -3049,3 +3049,286 @@ fn a_same_document_link_that_resolves_keeps_its_href() {
         outcome.changes
     );
 }
+
+// ---------------------------------------------------------------------------
+// package-references
+// ---------------------------------------------------------------------------
+
+/// The OPF of a book whose chapter really is at the archive root, with the
+/// manifest and guide spelling the path however the caller says.
+fn root_chapter_book(manifest_href: &str, guide_href: &str) -> Vec<u8> {
+    let opf = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
+    <dc:title>Test</dc:title><dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="{manifest_href}" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
+  <guide><reference href="{guide_href}" title="Text" type="text"/></guide>
+</package>"#
+    );
+    let ncx = NCX.replace(r#"src="ch1.xhtml""#, r#"src="../ch1.xhtml""#);
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", ncx.as_bytes()),
+        ("ch1.xhtml", doc("<p>text</p>").as_bytes()),
+    ])
+}
+
+/// OPF-031 and RSC-007 against the package document. The file is in the book;
+/// the guide is simply missing the `../` the manifest has.
+#[test]
+fn a_guide_href_missing_a_directory_step_is_repointed_at_the_real_file() {
+    let (outcome, after) = fix(&root_chapter_book("../ch1.xhtml", "ch1.xhtml"));
+
+    let opf = entry(&after, "OEBPS/content.opf");
+    assert!(opf.contains(r#"<reference href="../ch1.xhtml""#), "got {opf}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("repointed")),
+        "got {:?}",
+        outcome.changes
+    );
+    // And the document itself is untouched: this is a path repair, not a purge.
+    assert!(has(&after, "ch1.xhtml"), "got {:?}", names(&after));
+    assert!(opf.contains(r#"<itemref idref="ch1"/>"#), "got {opf}");
+}
+
+/// The regression that matters most here. Reading the epubcheck log alone, a
+/// manifest entry that is "not declared" *and* "could not be found" reads as a
+/// phantom to sweep away — and sweeping it away measures as a clean book with
+/// the chapter gone. Anything in the spine is therefore reported, never removed.
+#[test]
+fn a_spine_document_that_cannot_be_found_is_reported_and_never_removed() {
+    let (outcome, after) = fix(&root_chapter_book("nowhere/gone.xhtml", "../ch1.xhtml"));
+
+    let opf = entry(&after, "OEBPS/content.opf");
+    assert!(opf.contains(r#"<itemref idref="ch1"/>"#), "got {opf}");
+    assert!(opf.contains(r#"id="ch1""#), "the manifest entry stays: {opf}");
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("reading order") && f.contains("gone.xhtml")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
+/// A manifest item that is *not* in the spine carries no reading order with it,
+/// so a dead one can go. A Kobo build of *BAKEMONOGATARI* lists a `kobo.js`
+/// that is not in the archive.
+#[test]
+fn a_dead_manifest_item_outside_the_spine_is_removed() {
+    let opf = opf("2.0", r#"    <item id="js" href="js/kobo.js" media-type="application/javascript"/>"#, "", "");
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+    ]));
+
+    assert!(!entry(&after, "OEBPS/content.opf").contains("kobo.js"), "got {}", entry(&after, "OEBPS/content.opf"));
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("not in the book")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// `<!ELEMENT guide (reference+)>` — emptying it is an error of its own, so the
+/// element goes with its last entry.
+#[test]
+fn a_guide_whose_every_entry_goes_is_removed_with_them() {
+    let guide = "  <guide><reference href=\"cover.jpg\" type=\"cover\"/></guide>\n";
+    let opf = opf(
+        "2.0",
+        r#"    <item id="cov" href="cover.jpg" media-type="image/jpeg"/>"#,
+        "",
+        guide,
+    );
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(r#"<p><img src="cover.jpg" alt="c"/></p>"#).as_bytes()),
+        ("OEBPS/cover.jpg", b"\xFF\xD8\xFF\xE0"),
+    ]));
+
+    let got = entry(&after, "OEBPS/content.opf");
+    assert!(!got.contains("<guide"), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("<guide>")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// undeclared-resources
+// ---------------------------------------------------------------------------
+
+/// RSC-008: the archive holds a file the book uses and the manifest never
+/// mentions. In *Skylark* it is a font, and it only became visible once
+/// `css-paths` corrected the `..Fonts/` typo that was hiding it.
+#[test]
+fn a_font_the_stylesheet_uses_is_added_to_the_manifest() {
+    let css = "@font-face { font-family: G; src: url(../Fonts/G.otf); }";
+    let opf = opf(
+        "2.0",
+        r#"    <item id="css" href="Styles/s.css" media-type="text/css"/>"#,
+        "",
+        "",
+    );
+    let ch1 = doc("<p>text</p>").replace(
+        "</head>",
+        r#"<link rel="stylesheet" type="text/css" href="Styles/s.css"/></head>"#,
+    );
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/Styles/s.css", css.as_bytes()),
+        ("OEBPS/Fonts/G.otf", b"\x00\x01\x00\x00"),
+    ]));
+
+    let got = entry(&after, "OEBPS/content.opf");
+    assert!(got.contains(r#"href="Fonts/G.otf""#), "got {got}");
+    assert!(
+        got.contains(r#"media-type="application/vnd.ms-opentype""#),
+        "got {got}"
+    );
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("G.otf")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// A file nothing points at is not an error, and declaring it would be
+/// inventing work.
+#[test]
+fn an_unreferenced_stray_file_is_left_undeclared() {
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+        ("OEBPS/leftover.png", b"\x89PNG"),
+    ]));
+
+    assert!(
+        !entry(&after, "OEBPS/content.opf").contains("leftover"),
+        "got {}",
+        entry(&after, "OEBPS/content.opf")
+    );
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("leftover")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// truncated-documents
+// ---------------------------------------------------------------------------
+
+/// FATAL RSC-016: a document that simply stops, with everything still open.
+#[test]
+fn a_document_that_stops_mid_air_has_its_elements_closed() {
+    let truncated = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+         <head><title>T</title></head>\n<body>\n<div>\n<p>the last words</p>";
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", truncated.as_bytes()),
+    ]));
+
+    let got = ch1(&after);
+    assert!(epubfix::markup::well_formed(&got).is_ok(), "got {got}");
+    assert!(got.contains("the last words"), "nothing is lost: {got}");
+    assert!(got.trim_end().ends_with("</html>"), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("left open")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// A bare `<br>` is a void element written without its slash, not a document
+/// that stops early — closing it would swallow everything after it.
+#[test]
+fn an_unclosed_void_element_is_reported_rather_than_closed() {
+    let bad = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+         <head><title>T</title></head>\n<body>\n<div><p>one<br>two</p></div>\n</body></html>";
+    let (outcome, after) = roundtrip_full(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", bad.as_bytes()),
+    ]));
+
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("void element")),
+        "got {:?}",
+        outcome.findings
+    );
+    assert!(ch1(&after).contains("one<br>two"), "got {}", ch1(&after));
+}
+
+/// A well-formed document is never touched, however deeply nested.
+#[test]
+fn a_complete_document_is_not_given_extra_closing_tags() {
+    let (outcome, after) = fix(&book2("<div><p>one</p><p>two</p></div>"));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("left open")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(!ch1(&after).contains("</html>\n</html>"), "got {}", ch1(&after));
+}
+
+// ---------------------------------------------------------------------------
+// ncx-entry-ids
+// ---------------------------------------------------------------------------
+
+/// RSC-005: the NCX schema requires an `id` on every navigation entry, and a
+/// Kobo build of *BAKEMONOGATARI* writes none at all.
+#[test]
+fn nav_points_without_an_id_are_given_one_and_the_rest_keep_theirs() {
+    let ncx = NCX.replace(
+        r#"<navPoint id="n1" playOrder="1">"#,
+        r#"<navPoint playOrder="1">"#,
+    );
+    let ncx = ncx.replace(
+        "</navMap>",
+        r#"<navPoint id="n1" playOrder="2"><navLabel><text>B</text></navLabel>
+    <content src="ch1.xhtml"/></navPoint></navMap>"#,
+    );
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", ncx.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+    ]));
+
+    let got = entry(&after, "OEBPS/toc.ncx");
+    assert_eq!(got.matches("<navPoint").count(), 2, "got {got}");
+    assert_eq!(got.matches(" id=\"").count(), 2, "both have one now: {got}");
+    // The one that already had an id keeps it, so nothing that linked to it moves.
+    assert!(got.contains(r#"id="n1""#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("the schema requires")),
+        "got {:?}",
+        outcome.changes
+    );
+}

@@ -318,6 +318,75 @@ impl Fixer for PageListAttrs {
     }
 }
 
+/// RSC-005: `element "navPoint" missing required attribute "id"`.
+///
+/// The NCX schema requires an `id` on every `navPoint`, `navTarget` and
+/// `pageTarget`, and a Kobo build of *BAKEMONOGATARI* writes none at all. It is
+/// a required attribute with no meaning attached: nothing in the book links to a
+/// navPoint by id, and a reading system navigates by `<content src>`. So any
+/// unique value satisfies the schema and changes nothing, which makes this one
+/// of the few defects where inventing a value is exactly right rather than a
+/// guess.
+///
+/// Numbered in document order and checked against every id already in the file,
+/// so a book that has some and not others keeps the ones it has.
+pub struct NavPointIds;
+
+impl Fixer for NavPointIds {
+    fn name(&self) -> &'static str {
+        "ncx-entry-ids"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "give every NCX navigation entry the id its schema requires"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(name) = book.ncx_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+
+        let mut taken: Vec<String> = nodes
+            .iter()
+            .filter_map(|n| n.attr("id"))
+            .map(|a| a.value.clone())
+            .collect();
+        let mut edits = Edits::new();
+        let mut added = 0u32;
+
+        // Start and Empty only: an end tag carries no attributes, and the
+        // branch below writes one.
+        for node in nodes.iter().filter(|n| {
+            matches!(n.name.as_str(), "navpoint" | "navtarget" | "pagetarget")
+                && matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+        }) {
+            if node.attr("id").is_some() {
+                continue;
+            }
+            let id = unique(&format!("{}-1", node.name), &taken);
+            taken.push(id.clone());
+            edits.insert(node.name_end, format!(" id=\"{id}\""));
+            added += 1;
+        }
+
+        if added == 0 {
+            return Outcome::none();
+        }
+        book.set_text(&name, edits.apply(&text));
+        Outcome::change(format!(
+            "gave {added} NCX navigation entr(ies) the id the schema requires"
+        ))
+    }
+}
+
 /// `base`, or `base_2`, `base_3`, ... — whichever is not in `taken`.
 fn unique(base: &str, taken: &[String]) -> String {
     let mut candidate = base.to_string();

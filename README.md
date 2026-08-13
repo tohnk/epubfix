@@ -36,12 +36,14 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `spine-page-map` | RSC-005 | drops the Adobe `<spine page-map="...">` extension |
 | `media-types` | CSS-007, OPF-035, OPF-037 | replaces a manifest `media-type` that is mistyped or superseded |
 | `manifest-items` | OPF-091, OPF-099 | drops a fragment from a manifest `href`, and the entry a manifest makes for itself |
+| `package-references` | OPF-031, RSC-001, RSC-007 | repoints manifest and guide hrefs whose file moved, and drops the ones with no file behind them — never a document the spine names |
 | `empty-metadata` | OPF-054 | removes `<dc:*>` elements with no content, keeping the three both versions require |
 | `unique-identifier` | OPF-030 | makes `<package unique-identifier>` and the `<dc:identifier>` id agree, by creating the id or by moving the pointer |
 | `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
 | `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
 | `head-content` | RSC-005 | removes empty elements a `<head>` may not hold, and reports any carrying text |
 | `content-type-meta` | RSC-005 | corrects the `<meta http-equiv="content-type">` value HTML5 fixes, which XHTML 1.1 never checked |
+| `truncated-documents` | RSC-016 | closes the elements a document left open when it stopped mid-air |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `anchor-names` | RSC-005 | replaces the `name` attribute XHTML 1.1 removed from `<a>` with the `id` it stood for |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names — in content documents and the NCX — and every fragment pointing at them |
@@ -55,7 +57,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `misplaced-blockquotes` | RSC-005 | splits a paragraph around a `<blockquote>` it swallowed, or demotes the quotation to a `<span>` |
 | `inline-in-block` | RSC-005 | wraps a short run of inline content in a `<div>` where XHTML 1.1 wants a block, instead of retagging the book |
 | `misplaced-anchors` | RSC-005 | removes or rehomes `<a>` elements stranded between table rows, keeping every link target alive |
-| `guide-references` | OPF-032 | drops OPF `guide` entries pointing at something that is not a content document |
+| `guide-references` | OPF-032, RSC-005 | drops OPF `guide` entries pointing at something that is not a content document, and the whole `<guide>` when that empties it |
 | `orphan-links` | RSC-007 | repoints a link whose anchor was discarded at the heading its own text names |
 | `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead `<link>`/`<script>` includes, and an `<img>` whose file is proven absent — never an `<a>` |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
@@ -64,6 +66,8 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `reference-fragments` | RSC-009, RSC-013 | drops a fragment from a reference to a stylesheet or raster image, which cannot have one |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-pagelist-attrs` | RSC-005 | completes the co-required `id`/`class` pair on a `<pageList>` that carries only one |
+| `ncx-entry-ids` | RSC-005 | gives every NCX navigation entry the `id` its schema requires |
+| `undeclared-resources` | RSC-008 | declares a file the book uses that the manifest never mentions |
 | `filenames` | PKG-009, PKG-010, PKG-011, OPF-060, RSC-020 | renames resources whose filenames a URL cannot address — illegal characters, a trailing dot, or two entries differing only by case — and updates every reference |
 | `ncx-play-order` | RSC-005 | renumbers `toc.ncx` `playOrder` from 1, consecutive, one number per distinct target |
 | `ncx-uid` | NCX-001 | syncs `dtb:uid` to the OPF `unique-identifier`, byte for byte |
@@ -270,6 +274,59 @@ image gets a report instead. Anything else keeps the old behaviour: the `href`
 goes, the text and any `id` stay, and if the anchor was inside a `<nav>` the
 lost entry is named, because nothing in the package says where it should have
 gone.
+
+### The package document is where the archive is described, and it lied
+
+`dangling-resources` has resolved broken references since the beginning, and
+until now it could not see the one file whose whole job is to say where things
+are: it walks the book's *markup*, and the package document is not markup. So a
+manifest or `guide` naming a file that is not where it says was the one class of
+broken reference nothing checked. Seventeen books in a 200-book library have a
+defect of that shape.
+
+`package-references` runs the same [resolver](#finding-what-a-broken-reference-meant)
+over the OPF, and the answer is usually that the file is *there* and the path is
+wrong — an abbyy-to-epub *True Hallucinations* keeps its twenty chapters at the
+archive root, the manifest says `../chapter0001.html` and is right, the `guide`
+says `chapter0001.html` and is missing the `../`. Forty errors from one absent
+prefix.
+
+**Removal is the last resort, and never for a document in the spine.** Working
+from the epubcheck log alone, twenty chapters reported as both "not declared in
+manifest" and "could not be found" read as a phantom apparatus to sweep away —
+and sweeping it away *measures as a clean book*, with twenty of its twenty-one
+documents unreachable. Only the archive listing shows what is really wrong. A
+spine document whose file cannot be found is therefore always reported; a
+stylesheet, font or script is not in the reading order and can go.
+
+The mirror case is `undeclared-resources`: the archive holds a file the book
+uses and the manifest never mentions it. *Skylark* is the example, and it is one
+this tool created — correcting the `..Fonts/` typo in its stylesheet is what let
+epubcheck reach the font and say it was undeclared. Trading RSC-007 for RSC-008
+is not a repair, so the manifest entry is written too. Files nothing references
+are left alone: epubcheck says nothing about them, and declaring them would be
+inventing work.
+
+### Reaching the end of a file is not the same as finishing it
+
+`well_formed` asked quick-xml to read a document and reported success if it got
+to the end without an error. It does catch a *mismatched* end tag. It does not
+catch a document that simply runs out with elements still open — that reads to
+EOF and returns `Ok`.
+
+A real book has exactly that: *True Hallucinations* ends its only content
+document mid-air, 78 lines and then nothing, no `</div>`, `</body>` or
+`</html>`. epubcheck calls it `FATAL(RSC-016)` and stops reading the file, so
+every other defect in it was invisible behind that one.
+
+The hole mattered twice, because [the rollback guard](#no-pass-may-leave-a-document-worse-than-it-found-it)
+asks the same question to decide whether a pass damaged a file — a pass that
+deleted a closing tag would have sailed straight through it. So `well_formed`
+now tracks the open stack and fails at EOF with anything left on it, and
+`truncated-documents` closes what a stopped document left open. It runs first
+among the document passes, because the guard protects a file that parsed
+*before* a pass ran: a document that arrives malformed is the one file every
+other fixer would otherwise edit unprotected.
 
 ### Derived declarations come last
 

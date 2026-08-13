@@ -29,6 +29,8 @@
 //!   character tried, including accented Latin and CJK — is silent in both
 //!   forms and is now left alone.
 
+use std::fmt::Write as _;
+
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use std::collections::HashMap;
@@ -64,6 +66,30 @@ const OCF_FORBIDDEN: &[char] = &['"', '*', ':', '<', '>', '?', '\\', '|'];
 /// starts an escape sequence — so the file is reported missing as RSC-001.
 /// Percent-encoded, every one of them gives nothing at all.
 const ENCODE_REQUIRED: &[char] = &['#', '%', '[', ']', '^', '`', '{', '}'];
+
+/// Write an archive path as it must appear inside an `href`.
+///
+/// Anything generating a reference has to go through this. A manifest entry
+/// written for `a[1].css` with the bracket raw is RSC-020 — and worse here,
+/// because [`UnsafeFilenames`] would then see a raw reference, take it as the
+/// evidence it waits for, and rename a file that never needed renaming.
+///
+/// The set is [`ENCODE_REQUIRED`] plus whitespace, which is exactly what that
+/// constant and [`needs_rename`] were measured for.
+pub(crate) fn as_url_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if ENCODE_REQUIRED.contains(&c) || c.is_whitespace() {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).as_bytes() {
+                let _ = write!(out, "%{b:02X}");
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// True if `c` cannot stand in an OCF file name.
 ///

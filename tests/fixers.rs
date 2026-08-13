@@ -20,8 +20,9 @@ fn package_version_is_upgraded() {
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
   </metadata>
-  <manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>
-  <spine toc="ncx"/>
+  <manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
 </package>"#;
     let (changes, out) = roundtrip(&make_text_epub(&with(
         clean_book(),
@@ -42,7 +43,8 @@ fn spine_page_map_is_removed() {
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
   </metadata>
-  <manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>
+  <manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
   <spine toc="ncx" page-map="pm"><itemref idref="ch1"/></spine>
 </package>"#;
     let (changes, out) = roundtrip(&make_text_epub(&with(
@@ -67,11 +69,14 @@ fn doubled_font_media_type_is_corrected() {
   <manifest>
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
     <item id="f1" href="f.ttf" media-type="application/application/x-font-ttf"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
-  <spine toc="ncx"/>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
 </package>"#;
+    // The font is really in the archive: this test is about the media type,
+    // and an item for a file that is not there is a different defect.
     let (changes, out) = roundtrip(&make_text_epub(&with(
-        clean_book(),
+        plus(clean_book(), "OEBPS/f.ttf", "not really a font"),
         "OEBPS/content.opf",
         opf,
     )));

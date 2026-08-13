@@ -118,11 +118,19 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
     vec![
         Box::new(opf::Encoding),
         Box::new(opf::MimetypeEntry),
+        // First among the document passes, and deliberately. The rollback guard
+        // in `fix_book_with` protects a file that parsed *before* a pass ran, so
+        // a document that arrives truncated is the one file every later fixer
+        // edits unguarded. Repairing it first buys that protection back.
+        Box::new(documents::TruncatedDocuments),
         Box::new(opf::ContainerRootfile),
         Box::new(opf::PackageVersion),
         Box::new(opf::SpinePageMap),
         Box::new(opf::MediaTypes),
         Box::new(opf::ManifestItems),
+        // Before guide-references, which owns the rule that an emptied <guide>
+        // has to go, and needs to see what this leaves behind.
+        Box::new(opf::PackageReferences),
         Box::new(opf::EmptyMetadata),
         // Before ncx-uid, which finds the book's identifier *by* the id this
         // one makes resolve — while the pointer dangles that fixer is dead.
@@ -169,6 +177,13 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         // Before the renumbering, which closes the gaps removal leaves behind.
         Box::new(ncx::DeadNavEntries),
         Box::new(ncx::PageListAttrs),
+        Box::new(ncx::NavPointIds),
+        // After css-paths and the resource passes, which are what turn an
+        // unreachable file into one the manifest has to declare -- and before
+        // filenames, per the ordering rule above: this reads and writes hrefs,
+        // and running it after the rename would have it declare names that are
+        // no longer in the archive.
+        Box::new(opf::UndeclaredResources),
         Box::new(filenames::UnsafeFilenames),
         Box::new(ncx::PlayOrder),
         Box::new(ncx::DtbUid),
