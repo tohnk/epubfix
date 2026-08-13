@@ -140,7 +140,7 @@ fn sibling_head(book: &Book, doc: &str) -> Option<(String, String)> {
 }
 
 /// What the NCX calls this document, for the `<title>`.
-fn ncx_label(book: &Book, doc: &str) -> Option<String> {
+pub(crate) fn ncx_label(book: &Book, doc: &str) -> Option<String> {
     let ncx_name = book.ncx_name()?;
     let src = book.text(ncx_name)?;
     let nodes = scan(src).ok()?;
@@ -407,6 +407,103 @@ impl Fixer for TruncatedDocuments {
 
         let _ = closed;
         outcome
+    }
+}
+
+/// RSC-005: `Element "title" must not be empty.`
+///
+/// XHTML 1.1 declares `<!ELEMENT title (#PCDATA)>`, which an empty element
+/// satisfies; HTML5 requires text. So a book carrying `<title/>` is quiet until
+/// it is retagged, and then it is not. An Oxford *New History of Western
+/// Philosophy* has one in a footnote document and a Kobo *Essays and Aphorisms*
+/// one in its page map.
+///
+/// The name comes from the same place a wrapped fragment's does — what the NCX
+/// calls this document — falling back to the filename stem for a document the
+/// NCX never mentions, which is what both of these are. A `<title>` is not
+/// rendered in the page: [`crate::verify`] suppresses everything inside `<head>`
+/// when it compares visible text, so filling one in changes nothing a reader
+/// sees and nothing the preservation gate measures.
+///
+/// A document with *no* `<title>` at all is a different epubcheck message and is
+/// left alone, since nothing in the library has one and the repair has not been
+/// measured.
+pub struct DocumentTitles;
+
+impl Fixer for DocumentTitles {
+    fn name(&self) -> &'static str {
+        "document-titles"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "give an empty <title> the name the NCX uses for its document"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        if book.epub_version() < 3 {
+            return Outcome::none();
+        }
+        let mut filled = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let Some(head) = nodes
+                .iter()
+                .position(|n| n.name == "head" && n.kind == NodeKind::Start)
+            else {
+                continue;
+            };
+            let Some((i, node)) = nodes
+                .iter()
+                .enumerate()
+                .find(|(_, n)| n.name == "title" && n.parent == Some(head))
+            else {
+                continue;
+            };
+            // Empty either way it is written: `<title/>` or `<title></title>`.
+            let inner = match (node.kind, node.close) {
+                (NodeKind::Empty, _) => Some(""),
+                (NodeKind::Start, Some(close)) => {
+                    Some(&text[node.span.end..nodes[close].span.start])
+                }
+                _ => None,
+            };
+            if !inner.is_some_and(|t| t.trim().is_empty()) {
+                continue;
+            }
+
+            // The NCX label is raw source between <text> and </text>, so any
+            // entity in it is already written as one and goes in verbatim. The
+            // filename fallback is not, and a name with an `&` in it would make
+            // the document unparseable.
+            let name = ncx_label(book, &doc).unwrap_or_else(|| {
+                let base = basename(&doc);
+                let stem = base.rsplit_once('.').map_or(base, |(stem, _)| stem);
+                stem.replace('&', "&amp;").replace('<', "&lt;")
+            });
+            let mut edits = Edits::new();
+            match node.kind {
+                NodeKind::Empty => {
+                    edits.replace(node.span.clone(), format!("<title>{name}</title>"));
+                }
+                _ => edits.insert(node.span.end, name),
+            }
+            let _ = i;
+            book.set_text(&doc, edits.apply(&text));
+            filled += 1;
+        }
+
+        if filled == 0 {
+            return Outcome::none();
+        }
+        Outcome::change(format!(
+            "gave {filled} empty <title> element(s) a name, which HTML5 requires"
+        ))
     }
 }
 

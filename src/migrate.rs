@@ -479,12 +479,50 @@ fn build_nav(book: &mut Book, opf_name: &str, outcome: &mut Outcome) -> Option<S
 // Package document
 // ---------------------------------------------------------------------------
 
-/// `opf:` attributes on a `dc:` element, and the EPUB 3 property replacing each.
-fn refines_property(attr: &str) -> Option<&'static str> {
-    match attr {
-        "opf:role" => Some("role"),
-        "opf:file-as" => Some("file-as"),
-        "opf:scheme" => Some("identifier-type"),
+/// The OPF namespace, whatever a package document chooses to call it.
+const OPF_NS: &str = "http://www.idpf.org/2007/opf";
+
+/// Every prefix bound to [`OPF_NS`] anywhere in this package document.
+///
+/// Matching the literal string `opf:` was wrong, and quietly so. A prefix is
+/// just a local name for a namespace, and Calibre binds one *per element*:
+///
+/// ```xml
+/// <dc:creator xmlns:ns0="http://www.idpf.org/2007/opf" ns0:role="aut">
+/// <dc:contributor xmlns:ns1="http://www.idpf.org/2007/opf" ns1:role="bkp">
+/// <dc:identifier xmlns:ns2="http://www.idpf.org/2007/opf" ns2:scheme="calibre">
+/// ```
+///
+/// Three different prefixes for one namespace in one file, none of them `opf`.
+/// The converter saw no legacy attributes, reported none, and left all three
+/// behind for epubcheck to reject.
+///
+/// `opf` itself is always included: books write it without declaring it, and the
+/// package element usually binds it anyway.
+fn opf_prefixes(nodes: &[Node]) -> Vec<String> {
+    let mut out = vec!["opf".to_string()];
+    for attr in nodes.iter().flat_map(|n| &n.attrs) {
+        if attr.value.trim() == OPF_NS
+            && let Some(prefix) = attr.name.strip_prefix("xmlns:")
+            && !out.iter().any(|p| p == prefix)
+        {
+            out.push(prefix.to_string());
+        }
+    }
+    out
+}
+
+/// An OPF-namespace attribute on a `dc:` element, and the EPUB 3 property
+/// replacing it.
+fn refines_property(attr: &str, prefixes: &[String]) -> Option<&'static str> {
+    let (prefix, local) = attr.split_once(':')?;
+    if !prefixes.iter().any(|p| p == prefix) {
+        return None;
+    }
+    match local {
+        "role" => Some("role"),
+        "file-as" => Some("file-as"),
+        "scheme" => Some("identifier-type"),
         _ => None,
     }
 }
@@ -625,6 +663,76 @@ fn unique_id(stem: &str, taken: &mut HashSet<String>) -> String {
     candidate
 }
 
+/// The local name of an attribute in the OPF namespace, if it is in it.
+fn opf_local<'a>(attr: &'a str, prefixes: &[String]) -> Option<&'a str> {
+    let (prefix, local) = attr.split_once(':')?;
+    prefixes.iter().any(|p| p == prefix).then_some(local)
+}
+
+/// The `opf:event` on a `<dc:date>`, whatever prefix the book binds it under.
+fn date_event<'a>(node: &'a Node, prefixes: &[String]) -> Option<&'a crate::markup::Attr> {
+    node.attrs
+        .iter()
+        .find(|a| opf_local(&a.name, prefixes) == Some("event"))
+}
+
+/// EPUB 2's `<dc:date opf:event="...">` down to EPUB 3's single `<dc:date>`.
+///
+/// Two rules, and a book can break both at once. EPUB 3 has no `opf:event` —
+/// the events it distinguished are `<meta property="dcterms:*">` now — and it
+/// permits **at most one** `dc:date`, the publication date. A Penguin *Complete
+/// Poems of Keats* has two, one of them `opf:event="converted"`, which is 2
+/// errors from one habit; *Essays and Aphorisms* and a *Slaughterhouse-Five*
+/// have the attribute without the duplicate.
+///
+/// Measured on Keats: dropping the attribute alone leaves 1 error and dropping
+/// the extra date alone leaves 0 — but only because the second date happened to
+/// be the one carrying the attribute. Both rules are applied, so it does not
+/// matter which way round a book writes them.
+///
+/// The survivor is chosen rather than assumed: an `opf:event="publication"` says
+/// outright which date is the publication date, and only failing that does the
+/// first one win. `dcterms:modified` is added separately by the migration and
+/// carries what a `modification` event used to say.
+fn modernise_dates(
+    text: &str,
+    nodes: &[Node],
+    prefixes: &[String],
+    edits: &mut Edits,
+) -> u32 {
+    let dates: Vec<&Node> = nodes
+        .iter()
+        .filter(|n| {
+            n.name == "date"
+                && matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+                && text[n.span.clone()].contains("<dc:")
+        })
+        .collect();
+    if dates.is_empty() {
+        return 0;
+    }
+
+    let keep = dates
+        .iter()
+        .position(|n| date_event(n, prefixes).is_some_and(|a| a.value.eq_ignore_ascii_case("publication")))
+        .or_else(|| dates.iter().position(|n| date_event(n, prefixes).is_none()))
+        .unwrap_or(0);
+
+    let mut fixed = 0;
+    for (i, node) in dates.iter().enumerate() {
+        if i != keep {
+            edits.delete(crate::markup::line_span(text, node.element_span(nodes)));
+            fixed += 1;
+            continue;
+        }
+        if let Some(attr) = date_event(node, prefixes) {
+            edits.delete(attr.span_with_space.clone());
+            fixed += 1;
+        }
+    }
+    fixed
+}
+
 /// Turn `opf:role` / `opf:file-as` / `opf:scheme` into `<meta refines>` lines,
 /// minting an id on the `dc:` element when it has none.
 fn modernise_dc_metadata(
@@ -632,8 +740,11 @@ fn modernise_dc_metadata(
     nodes: &[Node],
     taken: &mut HashSet<String>,
     edits: &mut Edits,
+    dates_fixed: &mut u32,
 ) -> Vec<String> {
     let mut refines = Vec::new();
+    let prefixes = opf_prefixes(nodes);
+    *dates_fixed += modernise_dates(text, nodes, &prefixes, edits);
     for node in nodes.iter().filter(|n| n.kind != NodeKind::End) {
         if !text[node.span.clone()].contains("<dc:") {
             continue;
@@ -641,7 +752,7 @@ fn modernise_dc_metadata(
         let legacy: Vec<_> = node
             .attrs
             .iter()
-            .filter(|a| refines_property(&a.name).is_some())
+            .filter(|a| refines_property(&a.name, &prefixes).is_some())
             .collect();
         if legacy.is_empty() {
             continue;
@@ -655,7 +766,7 @@ fn modernise_dc_metadata(
             id
         };
         for attr in legacy {
-            let property = refines_property(&attr.name).expect("filtered above");
+            let property = refines_property(&attr.name, &prefixes).expect("filtered above");
             edits.delete(attr.span_with_space.clone());
             refines.push(format!(
                 "    <meta refines=\"#{id}\" property=\"{property}\">{}</meta>",
@@ -835,11 +946,18 @@ fn rewrite_package(
         outcome.push_change(format!("package version {} -> 3.0", &c[2]));
     }
 
-    let refines = modernise_dc_metadata(&text, &nodes, &mut taken, &mut edits);
+    let mut dates_fixed = 0u32;
+    let refines = modernise_dc_metadata(&text, &nodes, &mut taken, &mut edits, &mut dates_fixed);
     if !refines.is_empty() {
         outcome.push_change(format!(
             "converted {} legacy opf: attribute(s) to <meta refines>",
             refines.len()
+        ));
+    }
+    if dates_fixed > 0 {
+        outcome.push_change(format!(
+            "brought {dates_fixed} <dc:date> element(s) up to EPUB 3, which drops opf:event and \
+             permits one date"
         ));
     }
 

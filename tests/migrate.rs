@@ -683,3 +683,139 @@ fn a_book_with_no_guide_gets_no_landmarks_nav() {
     let (_, after) = migrate(&epub2_ncx(VERSE, "<p>x</p>", NESTED_NCX));
     assert!(!entry(&after, "OEBPS/nav.xhtml").contains("landmarks"));
 }
+
+// ---------------------------------------------------------------------------
+// Package metadata the converter used to miss
+// ---------------------------------------------------------------------------
+
+/// An EPUB 2 book with caller-supplied `<metadata>` contents and NCX bytes.
+fn book_meta(metadata: &str, ncx: &[u8]) -> Vec<u8> {
+    let opf = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+{metadata}
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
+</package>"#
+    );
+    let ch1 = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+        <html xmlns=\"http://www.w3.org/1999/xhtml\">\n\
+        <head><title>T</title></head>\n<body><p>text</p></body></html>";
+    common::make_epub(&[
+        ("META-INF/container.xml", common::CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", ncx),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+    ])
+}
+
+const PLAIN_NCX: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="urn:uuid:1234-5678"/></head>
+  <docTitle><text>Test</text></docTitle>
+  <navMap><navPoint id="n1" playOrder="1"><navLabel><text>One</text></navLabel>
+    <content src="ch1.xhtml"/></navPoint></navMap>
+</ncx>"#;
+
+/// A prefix is a local name for a namespace, and Calibre binds one *per
+/// element* — `ns0`, `ns1`, `ns2` for three attributes in one file, none of
+/// them `opf`. Matching the literal string `opf:` saw none of them.
+#[test]
+fn legacy_opf_attributes_are_found_under_whatever_prefix_a_book_binds() {
+    let metadata = concat!(
+        "    <dc:identifier id=\"BookId\">urn:uuid:1234-5678</dc:identifier>\n",
+        "    <dc:title>T</dc:title><dc:language>en</dc:language>\n",
+        "    <dc:creator xmlns:ns0=\"http://www.idpf.org/2007/opf\" ns0:role=\"aut\" ",
+        "ns0:file-as=\"Mckenna, Terence\">Terence Mckenna</dc:creator>\n",
+        "    <dc:contributor xmlns:ns1=\"http://www.idpf.org/2007/opf\" ns1:role=\"bkp\">calibre</dc:contributor>"
+    );
+    let (outcome, after) = roundtrip_migrated(&book_meta(metadata, PLAIN_NCX.as_bytes()));
+    let opf = entry(&after, "OEBPS/content.opf");
+
+    assert!(!opf.contains("ns0:role"), "{opf}");
+    assert!(!opf.contains("ns0:file-as"), "{opf}");
+    assert!(!opf.contains("ns1:role"), "{opf}");
+    assert!(opf.contains(r#"property="role">aut</meta>"#), "{opf}");
+    assert!(opf.contains(r#"property="file-as">Mckenna, Terence</meta>"#), "{opf}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("3 legacy opf:")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// EPUB 3 has no `opf:event` and permits at most one `<dc:date>`. A book can
+/// break both at once, so both rules are applied — and the survivor is the one
+/// that says it is the publication date, not merely the first.
+#[test]
+fn legacy_dates_are_reduced_to_the_one_epub3_allows() {
+    let metadata = concat!(
+        "    <dc:identifier id=\"BookId\">urn:uuid:1234-5678</dc:identifier>\n",
+        "    <dc:title>T</dc:title><dc:language>en</dc:language>\n",
+        "    <dc:date xmlns:opf=\"http://www.idpf.org/2007/opf\" opf:event=\"converted\">2009-12-10</dc:date>\n",
+        "    <dc:date xmlns:opf=\"http://www.idpf.org/2007/opf\" opf:event=\"publication\">2010-10-25</dc:date>"
+    );
+    let (outcome, after) = roundtrip_migrated(&book_meta(metadata, PLAIN_NCX.as_bytes()));
+    let opf = entry(&after, "OEBPS/content.opf");
+
+    assert!(!opf.contains("opf:event"), "{opf}");
+    assert_eq!(opf.matches("<dc:date").count(), 1, "{opf}");
+    // The publication date is the one kept, not the first one in the file.
+    assert!(opf.contains("2010-10-25"), "{opf}");
+    assert!(!opf.contains("2009-12-10"), "{opf}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("<dc:date>")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// A single date carrying the attribute keeps its value and loses the attribute.
+#[test]
+fn a_lone_dated_element_keeps_its_value() {
+    let metadata = concat!(
+        "    <dc:identifier id=\"BookId\">urn:uuid:1234-5678</dc:identifier>\n",
+        "    <dc:title>T</dc:title><dc:language>en</dc:language>\n",
+        "    <dc:date xmlns:opf=\"http://www.idpf.org/2007/opf\" opf:event=\"modification\">2011-01-01</dc:date>"
+    );
+    let (_, after) = roundtrip_migrated(&book_meta(metadata, PLAIN_NCX.as_bytes()));
+    let opf = entry(&after, "OEBPS/content.opf");
+    assert!(!opf.contains("opf:event"), "{opf}");
+    assert!(opf.contains("2011-01-01"), "{opf}");
+}
+
+/// A UTF-8 byte-order mark left every span the scanner produced three bytes
+/// out, so every element name came back empty and the file matched nothing.
+/// Four books reported "the NCX has no navMap" for an NCX that plainly had one.
+#[test]
+fn a_byte_order_mark_does_not_make_a_file_invisible() {
+    let metadata = concat!(
+        "    <dc:identifier id=\"BookId\">urn:uuid:1234-5678</dc:identifier>\n",
+        "    <dc:title>T</dc:title><dc:language>en</dc:language>"
+    );
+    let mut ncx = vec![0xEF, 0xBB, 0xBF];
+    ncx.extend_from_slice(PLAIN_NCX.as_bytes());
+
+    let (outcome, after) = roundtrip_migrated(&book_meta(metadata, &ncx));
+    assert!(
+        !outcome.findings.iter().any(|f| f.contains("no navMap")),
+        "got {:?}",
+        outcome.findings
+    );
+    assert!(has(&after, "OEBPS/nav.xhtml"), "{:?}", common::names(&after));
+    assert!(
+        entry(&after, "OEBPS/nav.xhtml").contains(r#"<a href="ch1.xhtml">One</a>"#),
+        "got {}",
+        entry(&after, "OEBPS/nav.xhtml")
+    );
+    // And the mark itself does not survive into the repaired book.
+    assert!(
+        !entry(&after, "OEBPS/toc.ncx").starts_with('\u{FEFF}'),
+        "the mark should be gone"
+    );
+}

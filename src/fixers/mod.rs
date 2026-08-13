@@ -132,6 +132,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         // Before guide-references, which owns the rule that an emptied <guide>
         // has to go, and needs to see what this leaves behind.
         Box::new(opf::PackageReferences),
+        Box::new(opf::NamespaceEscapes),
         Box::new(opf::EmptyMetadata),
         // Before ncx-uid, which finds the book's identifier *by* the id this
         // one makes resolve — while the pointer dangles that fixer is dead.
@@ -144,6 +145,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(documents::FragmentDocuments),
         Box::new(documents::HeadContent),
         Box::new(documents::ContentTypeMeta),
+        Box::new(documents::DocumentTitles),
         Box::new(attrs::XhtmlNamespace),
         // Before xml-ids: a name it removes is one less id to sanitise.
         Box::new(attrs::AnchorNames),

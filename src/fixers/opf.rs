@@ -399,6 +399,84 @@ impl Fixer for PackageReferences {
     }
 }
 
+/// RSC-005: `element "meta" not allowed anywhere` — an element pushed out of
+/// the package namespace by `xmlns=""`.
+///
+/// A Sigil build of *Butcher's Crossing* writes, among ordinary metadata:
+///
+/// ```xml
+/// <meta xmlns="" name="BNContentKind" content="book"/>
+/// ```
+///
+/// `xmlns=""` *un*-declares the default namespace for that element, so this
+/// `<meta>` is not in the OPF namespace at all — it is in no namespace, which is
+/// why epubcheck says "not allowed anywhere" rather than "not allowed here". It
+/// looks identical to its neighbours and is the only one that is wrong.
+///
+/// Removing the declaration puts the element back in the namespace every element
+/// around it is already in, which is plainly what was meant: a vendor metadata
+/// entry sitting among other `<meta name content>` entries. Deleting the element
+/// measures the same, and keeps less — so the declaration goes and the metadata
+/// stays.
+///
+/// Only inside the package document, and only where the package itself has a
+/// default namespace to fall back into. Elsewhere `xmlns=""` may be deliberate.
+pub struct NamespaceEscapes;
+
+impl Fixer for NamespaceEscapes {
+    fn name(&self) -> &'static str {
+        "namespace-escapes"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "put a package element that xmlns=\"\" pushed out of the OPF namespace back into it"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+        // Nothing to fall back into means nothing to repair.
+        if !nodes
+            .iter()
+            .any(|n| n.name == "package" && n.attr("xmlns").is_some())
+        {
+            return Outcome::none();
+        }
+
+        let mut edits = Edits::new();
+        let mut fixed = 0u32;
+        for node in nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Start | NodeKind::Empty))
+        {
+            if let Some(attr) = node.attr("xmlns")
+                && attr.value.trim().is_empty()
+            {
+                edits.delete(attr.span_with_space.clone());
+                fixed += 1;
+            }
+        }
+
+        if fixed == 0 {
+            return Outcome::none();
+        }
+        book.set_text(&opf_name, edits.apply(&text));
+        Outcome::change(format!(
+            "put {fixed} package element(s) back in the OPF namespace that an empty xmlns had \
+             pushed out of it"
+        ))
+    }
+}
+
 /// RSC-008: `Referenced resource … is not declared in the OPF manifest`.
 ///
 /// The mirror of [`PackageReferences`]: there the manifest names a file that is

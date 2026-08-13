@@ -481,7 +481,7 @@ impl Fixer for ImageDimensions {
         if book.epub_version() < 3 {
             return outcome;
         }
-        let mut moved = 0u32;
+        let (mut moved, mut trimmed) = (0u32, 0u32);
 
         for doc in book.markup_names() {
             let Some(text) = book.text(&doc).map(str::to_owned) else {
@@ -503,6 +503,17 @@ impl Fixer for ImageDimensions {
                     let value = attr.value.trim();
                     // Already what HTML5 asks for.
                     if !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()) {
+                        continue;
+                    }
+                    // `196px` says exactly what `196` says — the attribute's
+                    // unit *is* the CSS pixel — so the unit simply comes off and
+                    // the value stays an attribute. Moving it to CSS would work
+                    // too and would be the larger edit for no gain. A Kodansha
+                    // *Wild Sheep Chase* writes every one of its rules and
+                    // ornaments this way, 220 of them.
+                    if let Some(px) = strip_px(value) {
+                        edits.replace(attr.span.clone(), format!("{}=\"{px}\"", attr.name));
+                        trimmed += 1;
                         continue;
                     }
                     let Some(css) = length(value) else {
@@ -527,6 +538,12 @@ impl Fixer for ImageDimensions {
             }
         }
 
+        if trimmed > 0 {
+            outcome.push_change(format!(
+                "dropped the redundant \"px\" from {trimmed} <img> width/height attribute(s), \
+                 which HTML5 needs to be a whole number of pixels"
+            ));
+        }
         if moved > 0 {
             outcome.push_change(format!(
                 "moved {moved} <img> width/height value(s) into CSS, which HTML5 needs to be a \
@@ -535,4 +552,13 @@ impl Fixer for ImageDimensions {
         }
         outcome
     }
+}
+
+/// `196px` -> `196`, when that is all the value is.
+fn strip_px(value: &str) -> Option<&str> {
+    let digits = value.get(..value.len().checked_sub(2)?)?;
+    value[value.len() - 2..]
+        .eq_ignore_ascii_case("px")
+        .then_some(digits)
+        .filter(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
 }

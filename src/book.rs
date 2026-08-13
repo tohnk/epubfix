@@ -98,6 +98,24 @@ impl Book {
 
         // UTF-8 first, then UTF-16 by its byte-order mark. Anything that is
         // neither is left byte-for-byte alone.
+        //
+        // # The UTF-8 byte-order mark has to come off
+        //
+        // Not for tidiness. quick-xml reports buffer positions relative to the
+        // text *after* the mark, so with a `\u{FEFF}` still on the front every
+        // span the scanner produces is three bytes out and `dissect` reads the
+        // element name from the wrong offset. The result is a node list of the
+        // right length in which every name is the empty string — so the file
+        // matches nothing, and **every fixer silently skips it**.
+        //
+        // That is how a Kodansha *Wild Sheep Chase* and three Dune books came to
+        // report "the NCX has no navMap": their NCX has 58 navPoints and a
+        // perfectly good `<navMap>`, and not one element of it was visible.
+        //
+        // Removing it is safe and measured: epubcheck scores both books
+        // identically with the mark and without it. And because the mark is
+        // stripped on the way in, `verify` compares two texts that never had
+        // one, so the preservation gate is unaffected.
         let mut texts = HashMap::new();
         let mut transcoded = Vec::new();
         for e in &entries {
@@ -105,7 +123,7 @@ impl Book {
                 continue;
             }
             if let Ok(s) = std::str::from_utf8(&e.data) {
-                texts.insert(e.name.clone(), s.to_owned());
+                texts.insert(e.name.clone(), s.trim_start_matches('\u{FEFF}').to_owned());
             } else if let Some(s) = from_utf16(&e.data) {
                 texts.insert(e.name.clone(), s);
                 transcoded.push(e.name.clone());

@@ -3633,3 +3633,117 @@ fn a_percentage_image_width_is_left_alone_under_epub2() {
     ]));
     assert!(ch1(&after).contains(r#"width="100%""#), "got {}", ch1(&after));
 }
+
+// ---------------------------------------------------------------------------
+// document-titles
+// ---------------------------------------------------------------------------
+
+/// RSC-005: `Element "title" must not be empty.` XHTML 1.1 declares
+/// `<!ELEMENT title (#PCDATA)>`, which an empty element satisfies; HTML5 wants
+/// text. So a book carrying `<title/>` is quiet until it is retagged.
+#[test]
+fn an_empty_title_is_given_the_name_the_ncx_uses() {
+    for empty in ["<title/>", "<title></title>"] {
+        let body = doc("<p>text</p>").replace("<title>T</title>", empty);
+        // EPUB 3, since XHTML 1.1 accepts an empty title; the NCX rides along
+        // as many retagged books' does, and is where the name comes from.
+        // keep-version, or the retag would downgrade this minimal book to
+        // EPUB 2 -- correctly -- and the fixer would have nothing to do.
+        let (outcome, after) = roundtrip_kept(&make_epub(&[
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
+            ("OEBPS/toc.ncx", NCX.as_bytes()),
+            ("OEBPS/ch1.xhtml", body.as_bytes()),
+        ]));
+
+        // The NCX calls ch1.xhtml "A", so that is the name it gets.
+        let got = ch1(&after);
+        assert!(got.contains("<title>A</title>"), "{empty}: got {got}");
+        assert!(
+            outcome.changes.iter().any(|c| c.contains("empty <title>")),
+            "{empty}: got {:?}",
+            outcome.changes
+        );
+    }
+}
+
+/// A title with text in it is nobody's business.
+#[test]
+fn a_title_that_has_a_name_is_left_alone() {
+    let (outcome, after) = fix(&book2("<p>text</p>"));
+    assert!(ch1(&after).contains("<title>T</title>"), "got {}", ch1(&after));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("<title>")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// namespace-escapes
+// ---------------------------------------------------------------------------
+
+/// RSC-005: `element "meta" not allowed anywhere`. `xmlns=""` un-declares the
+/// default namespace for that one element, so a Sigil *Butcher's Crossing*'s
+/// `<meta xmlns="" name="BNContentKind"/>` is in no namespace at all — which is
+/// why epubcheck says "anywhere" rather than "here". It looks identical to its
+/// neighbours and is the only one that is wrong.
+#[test]
+fn an_element_pushed_out_of_the_opf_namespace_is_put_back() {
+    let extra = "    <meta xmlns=\"\" name=\"BNContentKind\" content=\"book\"/>\n";
+    let base = opf("2.0", "", "", "");
+    let with_meta = base.replace("  </metadata>", &format!("{extra}  </metadata>"));
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", with_meta.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+    ]));
+
+    let got = entry(&after, "OEBPS/content.opf");
+    assert!(!got.contains(r#"xmlns="""#), "got {got}");
+    // The metadata itself is kept: deleting the element measures the same and
+    // keeps less.
+    assert!(got.contains(r#"name="BNContentKind""#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("OPF namespace")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// A real namespace declaration is not an escape and must survive.
+#[test]
+fn a_populated_xmlns_is_not_touched() {
+    let (_, after) = fix(&book2("<p>text</p>"));
+    assert!(
+        entry(&after, "OEBPS/content.opf").contains(r#"xmlns="http://www.idpf.org/2007/opf""#),
+        "got {}",
+        entry(&after, "OEBPS/content.opf")
+    );
+}
+
+/// `196px` says exactly what `196` says, so the unit comes off and the value
+/// stays an attribute. A Kodansha *Wild Sheep Chase* writes 212 of them, and
+/// reporting each as unconvertible was this fixer's own bug.
+#[test]
+fn a_pixel_unit_on_an_image_dimension_is_simply_dropped() {
+    let body = r#"<p><img alt="a" src="a.jpg" width="196px" height="3PX"/></p>"#;
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+        ("OEBPS/a.jpg", b"\xFF\xD8\xFF\xE0"),
+    ]));
+
+    let got = ch1(&after);
+    assert!(got.contains(r#"width="196""#), "got {got}");
+    assert!(got.contains(r#"height="3""#), "got {got}");
+    assert!(!got.contains("style="), "no CSS is needed for this: {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("redundant")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(outcome.findings.is_empty(), "got {:?}", outcome.findings);
+}

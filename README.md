@@ -45,6 +45,8 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `content-type-meta` | RSC-005 | corrects the `<meta http-equiv="content-type">` value HTML5 fixes, which XHTML 1.1 never checked, charset included |
 | `css-prohibited` | CSS-001 | remove the bidi properties an EPUB style sheet may not contain |
 | `column-groups` | RSC-005 | put a bare `<col>` inside the `<colgroup>` HTML5 requires |
+| `document-titles` | RSC-005 | give an empty `<title>` the name the NCX uses for its document |
+| `namespace-escapes` | RSC-005 | put a package element that `xmlns=""` pushed out of the OPF namespace back into it |
 | `truncated-documents` | RSC-016 | closes the elements a document left open when it stopped mid-air |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `anchor-names` | RSC-005 | replaces the `name` attribute XHTML 1.1 removed from `<a>` with the `id` it stood for |
@@ -428,11 +430,50 @@ same sweep across the rest of the library:
   the choice is between two valid renderings and here it is between keeping the
   layout and losing it.
 
-Across the nineteen books here that takes `--migrate-epub3` from 58 errors to
-15, in three classes still to do: leftover `opf:` attributes the package
-converter misses (`opf:event`, and a second `<dc:date>` where EPUB 3 permits
-one), two empty `<title>` elements, and one book's pre-existing `<p>`-inside-
-`<p>` damage, which is the same either way.
+### A prefix is not a namespace
+
+The package converter turned `opf:role`, `opf:file-as` and `opf:scheme` into
+`<meta refines>` and left three books' worth of them behind, because it matched
+the literal string `opf:`. A prefix is only a local name for a namespace, and
+Calibre binds one *per element*:
+
+```xml
+<dc:creator xmlns:ns0="http://www.idpf.org/2007/opf" ns0:role="aut">
+<dc:contributor xmlns:ns1="http://www.idpf.org/2007/opf" ns1:role="bkp">
+<dc:identifier xmlns:ns2="http://www.idpf.org/2007/opf" ns2:scheme="calibre">
+```
+
+Three prefixes for one namespace in one file, none of them `opf`. The converter
+saw nothing, reported nothing, and left all three for epubcheck. It now resolves
+by namespace and takes whatever prefixes a document binds to it.
+
+Alongside that, EPUB 3 has no `opf:event` and permits at most **one**
+`<dc:date>`. A book can break both at once — a Penguin *Keats* has two dates,
+one of them `opf:event="converted"` — so both rules are applied, and the
+survivor is the one that says it is the publication date rather than merely the
+first.
+
+### A byte-order mark made whole files invisible
+
+The worst bug in this round, and the one with no symptom. quick-xml reports
+buffer positions relative to the text *after* a UTF-8 byte-order mark, so with a
+`U+FEFF` still on the front every span the scanner produced was three bytes out
+and `dissect` read each element name from the wrong offset. The result is a node
+list of the right length in which **every name is the empty string** — so the
+file matches nothing, and every fixer silently skips it.
+
+That is how a Kodansha *Wild Sheep Chase* and three Dune books came to report
+"the NCX has no navMap": their NCX has 58 navPoints and a perfectly good
+`<navMap>`, and not one element of it was visible. `--migrate-epub3` then
+produced a book declaring EPUB 3 with no navigation document at all.
+
+The mark is now stripped when the book is read. Measured: epubcheck scores those
+books identically with it and without it, and because it comes off on the way
+in, `verify` compares two texts that never had one.
+
+Across the twenty-one books here, `--migrate-epub3` goes from 58 errors to 3 —
+all three in one book, whose `<p>`-inside-`<p>` damage is pre-existing and
+identical without the flag.
 
 ### The bytes decide the encoding, not the label
 
