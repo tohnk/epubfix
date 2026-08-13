@@ -5,7 +5,7 @@
 //! mutate the decoded text and record renames; nothing touches the disk until
 //! [`Book::save`] repacks the archive.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, Write};
 use std::sync::LazyLock;
 
@@ -41,6 +41,8 @@ pub struct Book {
     undo: HashMap<String, String>,
     /// Entries that arrived as UTF-16 and were decoded on the way in.
     transcoded: Vec<String>,
+    /// References a fixer has deliberately reserved for a person.
+    reserved: HashSet<(String, String)>,
 }
 
 /// Decode UTF-16 with a byte-order mark, which is the only form that turns up:
@@ -128,7 +130,42 @@ impl Book {
             ncx,
             undo: HashMap::new(),
             transcoded,
+            reserved: HashSet::new(),
         })
+    }
+
+    /// Reserve one reference for a person to decide about.
+    ///
+    /// A *finding* says "I can see a repair here and will not guess at it". The
+    /// trap is that a later, blunter pass can then take the choice away — and
+    /// the blunter the repair, the more likely it silences exactly the thing the
+    /// person was being asked to look at.
+    ///
+    /// The case that made this necessary: `orphan-links` can repoint a link
+    /// whose anchor was discarded at the heading its own text names, and
+    /// declines when *two* headings carry those words, because a contents page
+    /// pointing at the wrong chapter is worse than one pointing nowhere. It
+    /// reports, and the person now knows which two headings clash — they can
+    /// open the book and tell which was meant in a second. If
+    /// `dangling-resources` then unlinks it for being unresolvable, the report
+    /// still arrives but the `href` recording the intent is gone, and the repair
+    /// a person could have made has been made impossible.
+    ///
+    /// So the distinction is not "can this be resolved" but **"could anyone
+    /// resolve it"**. Where candidate targets exist and only a person can choose
+    /// between them, the construct is left exactly as it is.
+    pub fn reserve(&mut self, doc: &str, reference: &str) {
+        self.reserved
+            .insert((doc.to_string(), reference.to_string()));
+    }
+
+    /// Has some earlier pass reserved this reference for a person?
+    pub fn is_reserved(&self, doc: &str, reference: &str) -> bool {
+        // Scanned rather than hashed: the set is empty on almost every book and
+        // never larger than a handful, and this way the check allocates nothing.
+        self.reserved
+            .iter()
+            .any(|(d, r)| d == doc && r == reference)
     }
 
     /// Major EPUB version from the package document, e.g. `2` or `3`.

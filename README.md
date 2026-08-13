@@ -354,12 +354,35 @@ given, because the two are different:
   ordinary missing relative path, not as a fragment.
 * **The file is genuinely gone**, after the search above.
 
-Two guards keep this from eating a table of contents. `orphan-links` runs first
-and gets the refusal, so a Word bookmark whose text names exactly one heading in
-the book is repointed at that heading rather than unlinked — all ten of *Girl
-With Curious Hair*'s story links still resolve. And a link into a *document* that
-exists takes the repointing path long before this one. Across the sixteen books
-here, the new rule fires on none of them.
+Three guards keep this from eating a table of contents. `orphan-links` runs
+first and gets the refusal, so a Word bookmark whose text names exactly one
+heading in the book is repointed at that heading rather than unlinked — all ten
+of *Girl With Curious Hair*'s story links still resolve. A link into a
+*document* that exists takes the repointing path long before this one. And the
+third is the subject of the next section.
+
+### Unresolvable by code is not unresolvable by a person
+
+`orphan-links` declines when *two* headings carry the words a link's text names,
+because a contents page pointing at the wrong chapter is worse than one pointing
+nowhere. It reports, and the person now knows exactly which two headings clash —
+they can open the book and tell which was meant in seconds.
+
+Unlinking that would be the worst of both. The report still arrives, but the
+`href` recording what the link was *for* is gone, and the repair a person could
+have made has been made impossible. The blunter the fallback repair, the more
+likely it is to silence precisely the thing someone is being asked to look at.
+
+So a fixer that declines can say so, with `Book::reserve`, and every later pass
+leaves that reference exactly as it is. The test is not "can this be resolved"
+but **"could anyone resolve it"**: where candidate targets exist and only a
+person can choose between them, nothing touches it. Where the target was never a
+name — a converter's placeholder, a mojibake filename — there is nothing for
+anyone to choose from, and it is unlinked.
+
+The reserved link is also reported *once*. The pass that reserved it has already
+explained the problem, so the later pass that steps around it says nothing,
+rather than printing the same defect twice under a different heading.
 
 ### Derived declarations come last
 

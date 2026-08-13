@@ -267,7 +267,15 @@ impl Fixer for DanglingResources {
                                         .map_or(String::new(), |a| format!(" (\"{}\")", a.value)),
                                     if wrapper { ", and its empty wrapper" } else { "" }
                                 ));
-                            } else if node.name == "a" && attr.name == "href" {
+                            } else if node.name == "a"
+                                && attr.name == "href"
+                                // An earlier pass found candidate targets and
+                                // declined to choose between them. Unlinking
+                                // here would silence the very thing the person
+                                // is being asked to look at, and take the
+                                // evidence with it.
+                                && !book.is_reserved(&doc, &attr.value)
+                            {
                                 let literal = resolve_href(&doc, &attr.value)
                                     .map_or_else(|| attr.value.clone(), |(t, _)| t);
                                 if looks_like_a_filename(&literal) {
@@ -276,6 +284,10 @@ impl Fixer for DanglingResources {
                                     never.push(attr.value.clone());
                                 }
                                 edits.delete(attr.span_with_space.clone());
+                            } else if node.name == "a" && attr.name == "href" {
+                                // Reserved: say nothing. The pass that reserved
+                                // it has already reported it, and saying so
+                                // twice is the same defect printed twice.
                             } else {
                                 outcome.push_finding(format!(
                                     "{}: <{}> points at \"{}\", which is not in the book and has \
@@ -876,6 +888,7 @@ impl Fixer for OrphanLinks {
             };
             let Ok(nodes) = scan(&text) else { continue };
             let mut edits = Edits::new();
+            let mut reserve: Vec<String> = Vec::new();
 
             for node in nodes.iter().filter(|n| n.name == "a") {
                 let Some(href) = node.attr("href") else {
@@ -893,11 +906,15 @@ impl Fixer for OrphanLinks {
                 let [(target, id)] = hits.as_slice() else {
                     outcome.push_finding(format!(
                         "{}: <a> to \"{}\" reads \"{key}\", and {} headings say that, so there \
-                         is no way to tell which was meant",
+                         is no way to tell which was meant — someone who knows the book can, \
+                         in a second, and the link is left intact for them to do it",
                         basename(&doc),
                         href.value,
                         hits.len()
                     ));
+                    // The candidates exist and only a person can choose between
+                    // them, so nothing later may quietly unlink it.
+                    reserve.push(href.value.clone());
                     continue;
                 };
                 let rel = relative_to(&doc, target);
@@ -911,6 +928,9 @@ impl Fixer for OrphanLinks {
 
             if !edits.is_empty() {
                 book.set_text(&doc, edits.apply(&text));
+            }
+            for href in reserve {
+                book.reserve(&doc, &href);
             }
         }
 

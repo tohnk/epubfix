@@ -1930,15 +1930,27 @@ fn an_ambiguous_heading_is_reported_rather_than_guessed_at() {
         r#"<h1 id="b">LYNDON</h1><p>two</p>"#,
     ));
 
-    // orphan-links declines, so the reader is told which two headings clash —
-    // and the dead href still goes, since nothing can make it resolve.
+    // orphan-links found two candidates and declined to choose. A person who
+    // knows the book can, so the link is reserved: it keeps its href, and
+    // nothing later unlinks it for being unresolvable.
     assert!(
         outcome.findings.iter().any(|f| f.contains("2 headings")),
         "got {:?}",
         outcome.findings
     );
-    assert!(!ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
-    assert!(ch1(&after).contains(">LYNDON</a>"), "got {}", ch1(&after));
+    assert!(ch1(&after).contains(r#"href="_Toc1""#), "got {}", ch1(&after));
+    // And it is reported once, not once per pass that looked at it.
+    assert_eq!(
+        outcome.findings.iter().filter(|f| f.contains("_Toc1")).count(),
+        1,
+        "got {:?}",
+        outcome.findings
+    );
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("unlinked")),
+        "got {:?}",
+        outcome.changes
+    );
 }
 
 /// Fire on the observed error. A link that already lands somewhere is not this
