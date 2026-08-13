@@ -153,9 +153,11 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(ids::DuplicateIds),
         Box::new(attrs::DataAttributes),
         Box::new(attrs::KeywordCase),
+        Box::new(attrs::ObsoleteAttributes),
         Box::new(tables::LegacyTableAttrs {
             mode: opts.presentation,
         }),
+        Box::new(tables::ImageDimensions),
         Box::new(legacy_html::UnderlineElements),
         Box::new(legacy_html::ImgAlt),
         Box::new(nesting::NestedAnchors),

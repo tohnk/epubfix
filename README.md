@@ -52,7 +52,9 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `duplicate-ids` | RSC-005 | makes duplicated ids unique in content documents and the NCX alike, keeping the first — which is the one every link already resolves to |
 | `data-attributes` | HTM_061 | removes custom data attributes whose names HTML5 rejects (Kindle's `data-AmznRemoved`) |
 | `keyword-case` | RSC-005 | lower-cases an enumerated attribute value (`dir="LTR"`, `valign="TOP"`) that XHTML 1.1 spells in lower case |
+| `obsolete-attributes` | RSC-005 | remove the image-map attributes HTML5 dropped from `<a>` |
 | `legacy-table-attrs` | RSC-005 | strips presentational table attributes (`valign`, `align`, `bgcolor`, `nowrap`, …) the book's ruleset rejects, and clamps `border` |
+| `image-dimensions` | RSC-005 | move a non-integer `<img>` width or height into CSS, where it is still valid |
 | `underline-elements` | RSC-005 | turns the removed `<u>` into a `<span>` that still underlines |
 | `img-alt` | RSC-005 | adds `alt=""` to decorative images in EPUB 2, and reports the rest rather than inventing captions |
 | `nested-anchors` | RSC-005 | unwraps an `<a>` nested inside another, keeping its text and rehoming any id on a `<span>` |
@@ -409,7 +411,28 @@ library got worse. Three classes accounted for all of it:
 * **`<col>` directly inside `<table>`** (6), which XHTML 1.1 allows and HTML5
   does not — see `column-groups`.
 
-With those three, both books migrate to 0.
+With those three, both books migrate to 0. Two more classes came out of the
+same sweep across the rest of the library:
+
+* **`shape="rect"` on an `<a>`** (33 in one *Skylark*). HTML5 keeps `shape` on
+  `<area>`, where it describes a region of an image map, and dropped it from
+  `<a>`, where it only ever applied inside a `<map>`. It carries no
+  presentation, so `obsolete-attributes` simply removes it rather than leaving
+  `legacy-table-attrs` to strip it and report "no single-property CSS
+  equivalent" — true, and beside the point.
+* **`<img width="100%">`** (10 in one *Hobbit*). HTML5 keeps the attribute but
+  narrows it to a whole number of pixels. Stripping is not an option, which is
+  why `image-dimensions` is separate from `legacy-table-attrs`: the percentage
+  is doing real work, and losing it drops the picture to its natural size. The
+  value moves to inline CSS whatever `--strip-presentation` says, because there
+  the choice is between two valid renderings and here it is between keeping the
+  layout and losing it.
+
+Across the nineteen books here that takes `--migrate-epub3` from 58 errors to
+15, in three classes still to do: leftover `opf:` attributes the package
+converter misses (`opf:event`, and a second `<dc:date>` where EPUB 3 permits
+one), two empty `<title>` elements, and one book's pre-existing `<p>`-inside-
+`<p>` damage, which is the same either way.
 
 ### The bytes decide the encoding, not the label
 

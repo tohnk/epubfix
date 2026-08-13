@@ -387,6 +387,81 @@ impl Fixer for KeywordCase {
     }
 }
 
+/// Attributes HTML5 removed outright, on elements that still exist.
+///
+/// `shape` and `coords` describe a region of a client-side image map. HTML5
+/// keeps them on `<area>`, where they mean something, and dropped them from
+/// `<a>`, where they only ever applied inside a `<map>`. XHTML 1.1 allowed them
+/// on any `<a>`, and Calibre writes `shape="rect"` on every link it generates —
+/// a *Skylark* contents page has 33 of them, and every one is an error the
+/// moment the book is retagged.
+///
+/// They carry no presentation and no behaviour on an ordinary link, so this is
+/// a removal with nothing to weigh: no reading system has ever done anything
+/// with `shape` on an `<a>` outside a map, and the link is unchanged without it.
+/// That is why they are not left to `legacy-table-attrs`, which would strip them
+/// and then report "no single-property CSS equivalent" — true, and beside the
+/// point, since there is nothing to express.
+///
+/// EPUB 2 only checks against XHTML 1.1, where they are legal, so nothing
+/// happens there.
+pub struct ObsoleteAttributes;
+
+/// `element -> attributes HTML5 does not allow on it`.
+const OBSOLETE: &[(&str, &[&str])] = &[("a", &["shape", "coords"])];
+
+impl Fixer for ObsoleteAttributes {
+    fn name(&self) -> &'static str {
+        "obsolete-attributes"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "remove image-map attributes HTML5 dropped from <a>"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        if book.epub_version() < 3 {
+            return Outcome::none();
+        }
+        let mut removed = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            // Start and Empty only: an end tag has no attributes to remove.
+            for node in nodes
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::Start | NodeKind::Empty))
+            {
+                let Some((_, names)) = OBSOLETE.iter().find(|(el, _)| *el == node.name) else {
+                    continue;
+                };
+                for attr in node.attrs.iter().filter(|a| names.contains(&a.name.as_str())) {
+                    edits.delete(attr.span_with_space.clone());
+                    removed += 1;
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if removed == 0 {
+            return Outcome::none();
+        }
+        Outcome::change(format!(
+            "removed {removed} image-map attribute(s) HTML5 does not allow on <a>"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_invalid_data_name;

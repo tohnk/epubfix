@@ -3520,7 +3520,7 @@ fn bare_col_elements_are_wrapped_in_a_colgroup_under_epub3() {
 /// A `<col>` already inside a `<colgroup>` is where it belongs.
 #[test]
 fn a_col_already_in_a_colgroup_is_left_alone() {
-    let body = r#"<table><colgroup><col/></colgroup><tr><td>x</td></tr></table>"#;
+    let body = r"<table><colgroup><col/></colgroup><tr><td>x</td></tr></table>";
     let (outcome, after) = fix(&make_epub(&[
         ("META-INF/container.xml", CONTAINER.as_bytes()),
         ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
@@ -3537,7 +3537,7 @@ fn a_col_already_in_a_colgroup_is_left_alone() {
 /// EPUB 2 permits it, so nothing happens there.
 #[test]
 fn a_bare_col_is_left_alone_under_epub2() {
-    let body = r#"<table><col/><tr><td>x</td></tr></table>"#;
+    let body = r"<table><col/><tr><td>x</td></tr></table>";
     let (_, after) = roundtrip_kept(&make_epub(&[
         ("META-INF/container.xml", CONTAINER.as_bytes()),
         ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
@@ -3545,4 +3545,91 @@ fn a_bare_col_is_left_alone_under_epub2() {
         ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
     ]));
     assert!(!ch1(&after).contains("colgroup"), "got {}", ch1(&after));
+}
+
+// ---------------------------------------------------------------------------
+// obsolete-attributes
+// ---------------------------------------------------------------------------
+
+/// RSC-005: HTML5 keeps `shape` on `<area>` and dropped it from `<a>`, where it
+/// only ever applied inside a `<map>`. Calibre writes `shape="rect"` on every
+/// link it generates — a *Skylark* contents page has 33 of them.
+#[test]
+fn image_map_attributes_are_removed_from_an_anchor_under_epub3() {
+    // A target that exists: otherwise dangling-resources unlinks it first and
+    // the test proves nothing about `shape`.
+    let body = r#"<p><a href="ch1.xhtml" shape="rect" coords="0,0" class="c">Cover</a></p>"#;
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+    ]));
+
+    let got = ch1(&after);
+    assert!(!got.contains("shape") && !got.contains("coords"), "got {got}");
+    // Everything that means something stays.
+    assert!(got.contains(r#"<a href="ch1.xhtml" class="c">Cover</a>"#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("image-map")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// XHTML 1.1 allows them, so an EPUB 2 book is untouched.
+#[test]
+fn image_map_attributes_are_left_alone_under_epub2() {
+    let body = r#"<p><a href="ch1.xhtml" shape="rect">Cover</a></p>"#;
+    let (_, after) = roundtrip_kept(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+    ]));
+    assert!(ch1(&after).contains("shape"), "got {}", ch1(&after));
+}
+
+// ---------------------------------------------------------------------------
+// image-dimensions
+// ---------------------------------------------------------------------------
+
+/// RSC-005: HTML5 keeps `width` on `<img>` but narrows it to a whole number of
+/// pixels. XHTML 1.1 took a length, and a Harper Collins *Hobbit* uses
+/// `width="100%"` throughout — legal as EPUB 2, an error once retagged.
+#[test]
+fn a_percentage_image_width_moves_into_css_rather_than_being_stripped() {
+    let body = r#"<p><img alt="art" src="a.jpg" width="100%"/><img alt="b" src="b.jpg" height="200"/></p>"#;
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+        ("OEBPS/a.jpg", b"\xFF\xD8\xFF\xE0"),
+        ("OEBPS/b.jpg", b"\xFF\xD8\xFF\xE0"),
+    ]));
+
+    let got = ch1(&after);
+    // The layout is kept, not thrown away: the image still fills its column.
+    assert!(got.contains("width: 100%"), "got {got}");
+    assert!(!got.contains(r#"width="100%""#), "got {got}");
+    // A bare integer is already what HTML5 asks for and is left exactly alone.
+    assert!(got.contains(r#"height="200""#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("width/height")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// XHTML 1.1 accepts the percentage, so nothing moves under EPUB 2.
+#[test]
+fn a_percentage_image_width_is_left_alone_under_epub2() {
+    let body = r#"<p><img alt="art" src="a.jpg" width="100%"/></p>"#;
+    let (_, after) = roundtrip_kept(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc(body).as_bytes()),
+        ("OEBPS/a.jpg", b"\xFF\xD8\xFF\xE0"),
+    ]));
+    assert!(ch1(&after).contains(r#"width="100%""#), "got {}", ch1(&after));
 }

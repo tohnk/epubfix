@@ -24,7 +24,7 @@ use crate::book::Book;
 use crate::css::Stylesheet;
 use crate::fixers::{Fixer, Outcome};
 use crate::markup::{Edits, Node, NodeKind, scan};
-use crate::util::ends_with_any;
+use crate::util::{basename, ends_with_any};
 
 /// What to do with a presentational attribute the ruleset rejects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -444,4 +444,95 @@ fn summarise(names: &[String]) -> String {
         .map(|(n, c)| format!("{n}x{c}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// RSC-005: `value of attribute "width" is invalid; must be an integer`.
+///
+/// HTML5 keeps `width` and `height` on `<img>` — unlike the table attributes
+/// above, they are not obsolete — but narrows the value to a bare integer count
+/// of CSS pixels. XHTML 1.1 accepted a *length*, percentages included, and a
+/// Harper Collins *Hobbit* uses `<img width="100%"/>` throughout. Legal as EPUB
+/// 2, an error the moment the book is retagged.
+///
+/// Stripping is not an option here and that is the whole reason this is separate
+/// from [`LegacyTableAttrs`]. `width="100%"` is doing real work — the image
+/// fills the column — and removing it drops the picture back to its natural
+/// size, which is a visible change on a page nobody asked to change. So the
+/// value always moves to inline CSS, whatever `--strip-presentation` says: there
+/// the choice was between two valid renderings, and here it is between keeping
+/// the layout and losing it.
+///
+/// A bare integer is already correct and is left exactly as it is.
+pub struct ImageDimensions;
+
+impl Fixer for ImageDimensions {
+    fn name(&self) -> &'static str {
+        "image-dimensions"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "move a non-integer <img> width or height into CSS, where it is still valid"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let mut outcome = Outcome::none();
+        if book.epub_version() < 3 {
+            return outcome;
+        }
+        let mut moved = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            for node in nodes.iter().filter(|n| {
+                matches!(n.name.as_str(), "img" | "object")
+                    && matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+            }) {
+                let mut declarations: Vec<String> = Vec::new();
+                for attr in node
+                    .attrs
+                    .iter()
+                    .filter(|a| matches!(a.name.as_str(), "width" | "height"))
+                {
+                    let value = attr.value.trim();
+                    // Already what HTML5 asks for.
+                    if !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()) {
+                        continue;
+                    }
+                    let Some(css) = length(value) else {
+                        outcome.push_finding(format!(
+                            "{}: <{}> has {}=\"{value}\", which HTML5 needs to be a whole number \
+                             of pixels and which is not a length anything can convert",
+                            basename(&doc),
+                            node.name,
+                            attr.name
+                        ));
+                        continue;
+                    };
+                    declarations.push(format!("{}: {css}", attr.name));
+                    edits.delete(attr.span_with_space.clone());
+                    moved += 1;
+                }
+                merge_style(&mut edits, node, &declarations);
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if moved > 0 {
+            outcome.push_change(format!(
+                "moved {moved} <img> width/height value(s) into CSS, which HTML5 needs to be a \
+                 whole number of pixels on the attribute"
+            ));
+        }
+        outcome
+    }
 }
