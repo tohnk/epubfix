@@ -2320,6 +2320,11 @@ fn a_container_with_no_rootfile_path_is_pointed_at_the_package() {
     for rootfile in [
         r#"<rootfile media-type="application/oebps-package+xml"/>"#,
         r#"<rootfile full-path="" media-type="application/oebps-package+xml"/>"#,
+        // Written as a pair rather than self-closing, which is how both real
+        // books that hit this spell it. Without a kind filter the `</rootfile>`
+        // end node carries no attributes, takes the "absent" branch, and comes
+        // out as `</rootfile full-path="...">` — not XML.
+        r#"<rootfile media-type="application/oebps-package+xml"></rootfile>"#,
     ] {
         let container = CONTAINER.replace(
             r#"<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>"#,
@@ -2337,10 +2342,16 @@ fn a_container_with_no_rootfile_path_is_pointed_at_the_package() {
             "{rootfile}: got {:?}",
             outcome.changes
         );
+        let container = entry(&after, "META-INF/container.xml");
         assert!(
-            entry(&after, "META-INF/container.xml").contains(r#"full-path="OEBPS/content.opf""#),
-            "{rootfile}: got {}",
-            entry(&after, "META-INF/container.xml")
+            container.contains(r#"full-path="OEBPS/content.opf""#),
+            "{rootfile}: got {container}"
+        );
+        // The attribute landing *somewhere* is not the test. It has to land in
+        // a start tag, and only parsing the result says so.
+        assert!(
+            epubfix::markup::well_formed(&container).is_ok(),
+            "{rootfile}: got {container}"
         );
     }
 }
@@ -2833,5 +2844,208 @@ fn a_body_text_colour_is_moved_into_css() {
             .any(|f| f.contains("no single-property") && f.contains("text")),
         "got {:?}",
         outcome.findings
+    );
+}
+
+// ---------------------------------------------------------------------------
+// unique-identifier
+// ---------------------------------------------------------------------------
+
+/// The OPF of `opf()` with its `<dc:identifier>` line replaced.
+fn opf_with_identifier(identifiers: &str) -> String {
+    opf("2.0", "", "", "").replace(
+        r#"    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>"#,
+        identifiers,
+    )
+}
+
+fn book_with_identifier(identifiers: &str) -> Vec<u8> {
+    let opf = opf_with_identifier(identifiers);
+    make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", doc("<p>text</p>").as_bytes()),
+    ])
+}
+
+/// OPF-030: the package names an id its only identifier does not carry, and the
+/// identifier has no id at all. Give it the one being asked for.
+#[test]
+fn an_identifier_with_no_id_is_given_the_one_the_package_names() {
+    let (outcome, after) = fix(&book_with_identifier(
+        r#"    <dc:identifier opf:scheme="calibre" xmlns:opf="http://www.idpf.org/2007/opf">urn:uuid:9-9</dc:identifier>"#,
+    ));
+
+    let got = entry(&after, "OEBPS/content.opf");
+    assert!(got.contains(r#"<dc:identifier id="BookId""#), "got {got}");
+    assert!(got.contains(r#"unique-identifier="BookId""#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("BookId")),
+        "got {:?}",
+        outcome.changes
+    );
+    // And with the pointer resolving, the NCX can finally be synced to it.
+    assert!(
+        entry(&after, "OEBPS/toc.ncx").contains("urn:uuid:9-9"),
+        "got {}",
+        entry(&after, "OEBPS/toc.ncx")
+    );
+}
+
+/// The same defect, but the identifier already has an id of its own. Move the
+/// pointer instead — renaming the id would break any `refines="#id"` aimed at it.
+#[test]
+fn an_identifier_that_already_has_an_id_keeps_it_and_the_package_moves() {
+    let (outcome, after) = fix(&book_with_identifier(
+        r#"    <dc:identifier id="pub-id">urn:uuid:9-9</dc:identifier>"#,
+    ));
+
+    let got = entry(&after, "OEBPS/content.opf");
+    assert!(got.contains(r#"unique-identifier="pub-id""#), "got {got}");
+    assert!(got.contains(r#"<dc:identifier id="pub-id""#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("pub-id")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// With several identifiers and no pointer into any of them, which one is the
+/// book's identity is a decision with consequences. Report it.
+#[test]
+fn several_identifiers_and_a_dangling_pointer_are_reported_not_guessed() {
+    let (outcome, after) = fix(&book_with_identifier(
+        "    <dc:identifier>urn:uuid:9-9</dc:identifier>\n\
+         \x20   <dc:identifier opf:scheme=\"ISBN\" xmlns:opf=\"http://www.idpf.org/2007/opf\">1234567890</dc:identifier>",
+    ));
+
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("identity")),
+        "got {:?}",
+        outcome.findings
+    );
+    assert!(
+        !entry(&after, "OEBPS/content.opf").contains("id=\"BookId\""),
+        "nothing should have been assigned"
+    );
+}
+
+/// A pointer that already resolves is not this fixer's business.
+#[test]
+fn a_unique_identifier_that_resolves_is_left_alone() {
+    let (outcome, _) = fix(&book_with_identifier(
+        r#"    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>"#,
+    ));
+    assert!(
+        !outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("unique-identifier") || c.contains("<dc:identifier>")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// content-type-meta
+// ---------------------------------------------------------------------------
+
+const BAD_CT: &str =
+    r#"<meta content="http://www.w3.org/1999/xhtml; charset=utf-8" http-equiv="Content-Type"/>"#;
+
+/// RSC-005: HTML5 fixes the value of the encoding-declaration `<meta>`, and a
+/// Doubleday *Robot Dreams* puts a namespace URI where the media type goes.
+#[test]
+fn a_wrong_encoding_declaration_is_corrected_under_epub3() {
+    let opf = opf("3.0", "", "", "");
+    let body = doc("<p>text</p>").replace("<head>", &format!("<head>{BAD_CT}"));
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", body.as_bytes()),
+    ]));
+
+    let got = ch1(&after);
+    assert!(
+        got.contains(r#"content="text/html; charset=utf-8""#),
+        "got {got}"
+    );
+    assert!(!got.contains("1999/xhtml; charset"), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("encoding")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// XHTML 1.1 does not check the value — measured, the same markup is clean as
+/// EPUB 2 — so a book that stays EPUB 2 is not touched.
+#[test]
+fn a_wrong_encoding_declaration_is_left_alone_under_epub2() {
+    let body = doc("<p>text</p>").replace("<head>", &format!("<head>{BAD_CT}"));
+    let (_, after) = roundtrip_kept(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("2.0", "", "", "").as_bytes()),
+        ("OEBPS/toc.ncx", NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", body.as_bytes()),
+    ]));
+    assert!(ch1(&after).contains("1999/xhtml; charset"), "got {}", ch1(&after));
+}
+
+/// `charset=` is a claim about the bytes of the file. Relabelling one that says
+/// something else would turn a wrong declaration into a wrong document.
+#[test]
+fn an_encoding_declaration_naming_another_charset_is_reported() {
+    let meta = r#"<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1"/>"#;
+    let body = doc("<p>text</p>").replace("<head>", &format!("<head>{meta}"));
+    let (outcome, after) = fix(&make_epub(&[
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf("3.0", "", "", "").as_bytes()),
+        ("OEBPS/ch1.xhtml", body.as_bytes()),
+    ]));
+
+    assert!(
+        outcome.findings.iter().any(|f| f.contains("iso-8859-1")),
+        "got {:?}",
+        outcome.findings
+    );
+    assert!(ch1(&after).contains("iso-8859-1"), "got {}", ch1(&after));
+}
+
+// ---------------------------------------------------------------------------
+// broken-fragments: the same-document case
+// ---------------------------------------------------------------------------
+
+/// RSC-012 where the link is same-document and the anchor is nowhere in the
+/// book. There is no document to fall back on, so the href goes and the element,
+/// its text and its class stay.
+#[test]
+fn a_same_document_link_to_nothing_loses_its_href_and_keeps_its_text() {
+    let (outcome, after) = fix(&book2(
+        r##"<p><a href="#nowhere" class="c">Isaac Asimov</a></p>"##,
+    ));
+
+    let got = ch1(&after);
+    assert!(!got.contains("#nowhere"), "got {got}");
+    assert!(got.contains(r#"<a class="c">Isaac Asimov</a>"#), "got {got}");
+    assert!(
+        outcome.changes.iter().any(|c| c.contains("same-document")),
+        "got {:?}",
+        outcome.changes
+    );
+}
+
+/// The same link, but the anchor exists: nothing to do.
+#[test]
+fn a_same_document_link_that_resolves_keeps_its_href() {
+    let (outcome, after) = fix(&book2(
+        r##"<p id="here"><a href="#here" class="c">x</a></p>"##,
+    ));
+    assert!(ch1(&after).contains(r##"href="#here""##), "got {}", ch1(&after));
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("same-document")),
+        "got {:?}",
+        outcome.changes
     );
 }

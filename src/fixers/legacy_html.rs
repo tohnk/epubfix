@@ -62,7 +62,14 @@ impl Fixer for ImgAlt {
             let mut edits = Edits::new();
             let mut needs_caption = 0u32;
 
-            for node in nodes.iter().filter(|n| n.name == "img") {
+            // Start and Empty only. An end tag has no attributes, so a book
+            // written `<img ...></img>` would offer `</img>` as an image with
+            // no alt and no src — either a phantom "needs a caption" finding or,
+            // if the empty name matched, ` alt=""` written into a closing tag.
+            for node in nodes
+                .iter()
+                .filter(|n| n.name == "img" && matches!(n.kind, NodeKind::Start | NodeKind::Empty))
+            {
                 if node.attr("alt").is_some() {
                     continue;
                 }

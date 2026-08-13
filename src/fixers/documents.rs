@@ -290,6 +290,118 @@ impl Fixer for FragmentDocuments {
     }
 }
 
+/// What HTML5 requires of a `<meta http-equiv="content-type">`.
+const CONTENT_TYPE: &str = "text/html; charset=utf-8";
+
+/// RSC-005: `The meta element in encoding declaration state (http-equiv=
+/// 'content-type') must have the value "text/html; charset=utf-8"`.
+///
+/// HTML5 does not treat this `<meta>` as a general header declaration. It is the
+/// *encoding declaration*, and the one string above is the only value it may
+/// hold — the media type is fixed at `text/html` even in an XHTML document,
+/// which reads as wrong and is what the spec says.
+///
+/// A Doubleday build of *Robot Dreams* writes, in all 24 of its documents:
+///
+/// ```html
+/// <meta content="http://www.w3.org/1999/xhtml; charset=utf-8" http-equiv="Content-Type"/>
+/// ```
+///
+/// A namespace URI where a media type belongs — some converter reached for the
+/// wrong variable. The charset is right, which is the part that has ever
+/// mattered to a reading system, so nothing about the book renders differently.
+///
+/// EPUB 3 only, and that is the whole reason this exists as a fixer: XHTML 1.1
+/// does not check the value, so the book was quiet until this tool retagged it.
+/// Measured, on the real markup: 0 errors as EPUB 2, `1 ERROR(RSC-005)` per
+/// document as EPUB 3, and clean once the value is corrected.
+///
+/// The charset is the one part not rewritten blind. `charset=utf-8` is a claim
+/// about the bytes of the file, and a document declaring something else may
+/// genuinely be in that encoding — relabelling it would turn a wrong declaration
+/// into a wrong document. Those are reported.
+pub struct ContentTypeMeta;
+
+impl Fixer for ContentTypeMeta {
+    fn name(&self) -> &'static str {
+        "content-type-meta"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["RSC-005"]
+    }
+    fn description(&self) -> &'static str {
+        "correct the <meta> encoding declaration HTML5 fixes the value of"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let mut outcome = Outcome::none();
+        if book.epub_version() < 3 {
+            return outcome;
+        }
+        let mut fixed = 0u32;
+
+        for doc in book.markup_names() {
+            let Some(text) = book.text(&doc).map(str::to_owned) else {
+                continue;
+            };
+            let Ok(nodes) = scan(&text) else { continue };
+            let mut edits = Edits::new();
+
+            // Start and Empty only: an end tag carries no attributes, and the
+            // "absent content" branch below writes one.
+            for node in nodes.iter().filter(|n| {
+                n.name == "meta" && matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+            }) {
+                let Some(equiv) = node.attr("http-equiv") else {
+                    continue;
+                };
+                if !equiv.value.trim().eq_ignore_ascii_case("content-type") {
+                    continue;
+                }
+                let Some(content) = node.attr("content") else {
+                    edits.insert(node.name_end, format!(" content=\"{CONTENT_TYPE}\""));
+                    fixed += 1;
+                    continue;
+                };
+                let value = content.value.to_ascii_lowercase();
+                if value.split_whitespace().collect::<Vec<_>>().join(" ") == CONTENT_TYPE {
+                    continue;
+                }
+                // The declared charset, if it declares one.
+                let charset = value
+                    .split(';')
+                    .skip(1)
+                    .filter_map(|p| p.trim().strip_prefix("charset="))
+                    .map(|c| c.trim().trim_matches('"').to_string())
+                    .next();
+                match charset.as_deref() {
+                    None | Some("utf-8" | "utf8") => {
+                        edits.replace(content.span.clone(), format!("content=\"{CONTENT_TYPE}\""));
+                        fixed += 1;
+                    }
+                    Some(other) => outcome.push_finding(format!(
+                        "{}: the encoding declaration says charset={other}, and EPUB requires \
+                         UTF-8; rewriting the label would leave a document whose declaration \
+                         and bytes disagree, so it needs converting first",
+                        basename(&doc)
+                    )),
+                }
+            }
+
+            if !edits.is_empty() {
+                book.set_text(&doc, edits.apply(&text));
+            }
+        }
+
+        if fixed > 0 {
+            outcome.push_change(format!(
+                "corrected {fixed} <meta> encoding declaration(s) to \"{CONTENT_TYPE}\""
+            ));
+        }
+        outcome
+    }
+}
+
 /// Elements a `<head>` may hold.
 ///
 /// Deletion is driven by *absence* from this list, so the same rule as

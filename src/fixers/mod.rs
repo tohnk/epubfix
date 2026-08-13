@@ -124,6 +124,9 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         Box::new(opf::MediaTypes),
         Box::new(opf::ManifestItems),
         Box::new(opf::EmptyMetadata),
+        // Before ncx-uid, which finds the book's identifier *by* the id this
+        // one makes resolve — while the pointer dangles that fixer is dead.
+        Box::new(opf::UniqueIdentifier),
         Box::new(opf::DcLanguage {
             policy: opts.language,
         }),
@@ -131,6 +134,7 @@ pub fn all(opts: &crate::Options) -> Vec<Box<dyn Fixer>> {
         // one to put a namespace on, and comes out of this with a proper one.
         Box::new(documents::FragmentDocuments),
         Box::new(documents::HeadContent),
+        Box::new(documents::ContentTypeMeta),
         Box::new(attrs::XhtmlNamespace),
         // Before xml-ids: a name it removes is one less id to sanitise.
         Box::new(attrs::AnchorNames),

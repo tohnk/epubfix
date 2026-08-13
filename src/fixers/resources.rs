@@ -234,10 +234,24 @@ impl Fixer for DanglingResources {
 
 /// RSC-012: `Fragment identifier is not defined`.
 ///
-/// Three deterministic recoveries, in order. None of them is string similarity,
+/// Four deterministic recoveries, in order. None of them is string similarity,
 /// which is the point — in one real book the broken link `#1b` had to reach
 /// `id="Oneb"`, which no edit-distance heuristic would ever pair up, but which
 /// the backlink identifies unambiguously.
+///
+/// The last of the four is the one with nothing to recover. A Doubleday *Robot
+/// Dreams* generates its table of contents with a top-level
+/// `<a href="#TOC_id1163514">Isaac Asimov</a>` whose anchor Calibre discarded
+/// when it split the book at it. The link is same-document, so the third step's
+/// fallback — point it at the document and drop the fragment — has nothing to
+/// offer: we are already in that document. So the `href` goes and the element,
+/// its text and its class all stay.
+///
+/// Measured, all three of `<a>` without an href, a `<span>`, and `href=""`
+/// validate clean. Removing the attribute is the one that keeps the text, keeps
+/// the class, and keeps any `a { … }` rule in the book's own stylesheet applying
+/// to it — a `<span>` would lose that, and `href=""` would make it a self-link
+/// that reloads the page, which is worse behaviour than none.
 pub struct BrokenFragments;
 
 impl Fixer for BrokenFragments {
@@ -257,7 +271,7 @@ impl Fixer for BrokenFragments {
         let backlink = backlinks(book);
 
         let names: Vec<String> = book.names().to_vec();
-        let (mut recovered, mut relocated, mut dropped) = (0u32, 0u32, 0u32);
+        let (mut recovered, mut relocated, mut dropped, mut unlinked) = (0u32, 0u32, 0u32, 0u32);
 
         for name in &names {
             let Some(text) = book.text(name).map(str::to_owned) else {
@@ -330,6 +344,13 @@ impl Fixer for BrokenFragments {
                     if names.contains(&target) && !path.is_empty() {
                         edits.replace(attr.span.clone(), format!("{}=\"{path}\"", attr.name));
                         dropped += 1;
+                    } else if path.is_empty() && node.name == "a" && attr.name == "href" {
+                        // 4. Same-document, and defined nowhere in the book. No
+                        //    document to fall back on — we are already in it —
+                        //    so the link cannot be made to go anywhere, and what
+                        //    is left is to stop it claiming to.
+                        edits.delete(attr.span_with_space.clone());
+                        unlinked += 1;
                     } else {
                         outcome.push_finding(format!(
                             "{}: \"{}\" resolves to nothing at all",
@@ -345,22 +366,24 @@ impl Fixer for BrokenFragments {
             }
         }
 
-        if recovered > 0 {
-            outcome.push_change(format!(
-                "recovered {recovered} fragment target(s) from their backlinks"
-            ));
-        }
-        if relocated > 0 {
-            outcome.push_change(format!(
-                "repointed {relocated} fragment(s) at the document that defines them"
-            ));
-        }
-        if dropped > 0 {
-            outcome.push_change(format!(
-                "dropped {dropped} fragment(s) defined nowhere, leaving the link on the document"
-            ));
-        }
+        report(&mut outcome, [recovered, relocated, dropped, unlinked]);
         outcome
+    }
+}
+
+/// One line per recovery that fired, in the order they are tried.
+fn report(outcome: &mut Outcome, counts: [u32; 4]) {
+    const LINES: [&str; 4] = [
+        "recovered {n} fragment target(s) from their backlinks",
+        "repointed {n} fragment(s) at the document that defines them",
+        "dropped {n} fragment(s) defined nowhere, leaving the link on the document",
+        "removed the href from {n} same-document link(s) whose anchor is nowhere in the book, \
+         keeping the text and the styling",
+    ];
+    for (n, line) in counts.iter().zip(LINES) {
+        if *n > 0 {
+            outcome.push_change(line.replace("{n}", &n.to_string()));
+        }
     }
 }
 

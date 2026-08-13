@@ -9,7 +9,7 @@ use crate::fixers::{Fixer, Outcome};
 use crate::language::{self, Policy};
 use crate::markup::{Edits, NodeKind, line_span, scan};
 use crate::refs::resolve_href;
-use crate::util::{ends_with_any, re};
+use crate::util::{ends_with_any, is_bad_id, re};
 
 /// Read the OPF, hand it to `f`, and store the result if it changed.
 fn edit_opf(book: &mut Book, f: impl FnOnce(&str) -> String) -> bool {
@@ -556,6 +556,144 @@ impl Fixer for EmptyMetadata {
     }
 }
 
+/// OPF-030: `The unique-identifier "X" was not found`.
+///
+/// `<package unique-identifier="X">` names the id of the `<dc:identifier>` that
+/// is the book's identity. A Calibre build of *Either/Or* names
+/// `p9781400846931` and its one `<dc:identifier opf:scheme="calibre">` carries
+/// no `id` at all, so the package points at nothing. One error, and it takes
+/// `ncx-uid` down with it: that fixer finds the identifier *by* this id, so
+/// while the pointer dangles the NCX can never be synced either.
+///
+/// Two repairs, and which one applies depends on what the identifier already
+/// has:
+///
+/// * **No `id`.** Give it the one the package is asking for. Nothing else in
+///   the book can be referring to an id that does not exist, so this cannot
+///   break a reference — it only creates the target that was always meant to be
+///   there.
+/// * **A different `id`.** Repoint the package attribute instead. Renaming an
+///   id an element already carries would break any `refines="#id"` aimed at it,
+///   and EPUB 3 metadata refinement does exactly that.
+///
+/// Only when the book has exactly one `<dc:identifier>`. With several, which one
+/// is the book's identity is a decision with consequences — reading systems key
+/// annotations and reading position on it — and the package's own answer has
+/// been lost. So that is reported.
+///
+/// Measured: the real book is `1 ERROR(OPF-030)` before and clean after.
+pub struct UniqueIdentifier;
+
+impl Fixer for UniqueIdentifier {
+    fn name(&self) -> &'static str {
+        "unique-identifier"
+    }
+    fn codes(&self) -> &'static [&'static str] {
+        &["OPF-030"]
+    }
+    fn description(&self) -> &'static str {
+        "make the package unique-identifier and the <dc:identifier> id agree"
+    }
+
+    fn apply(&self, book: &mut Book) -> Outcome {
+        let Some(opf_name) = book.opf_name().map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Some(text) = book.text(&opf_name).map(str::to_owned) else {
+            return Outcome::none();
+        };
+        let Ok(nodes) = scan(&text) else {
+            return Outcome::none();
+        };
+
+        // Start and Empty only, here and below: an end tag carries no
+        // attributes, and the "absent" branch writes one.
+        let Some(package) = nodes
+            .iter()
+            .find(|n| n.name == "package" && matches!(n.kind, NodeKind::Start | NodeKind::Empty))
+        else {
+            return Outcome::none();
+        };
+        // No attribute at all is a schema error with a different repair, and
+        // guessing a value for it is not this fixer's business.
+        let Some(wanted_attr) = package.attr("unique-identifier") else {
+            return Outcome::none();
+        };
+        let wanted = wanted_attr.value.trim().to_string();
+        let wanted_span = wanted_attr.span.clone();
+
+        // Already resolves: the id exists somewhere in the package document.
+        if !wanted.is_empty()
+            && nodes.iter().any(|n| {
+                matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+                    && n.attr("id").is_some_and(|a| a.value == wanted)
+            })
+        {
+            return Outcome::none();
+        }
+
+        let metadata = nodes
+            .iter()
+            .position(|n| n.name == "metadata" && n.kind == NodeKind::Start);
+        let idents: Vec<&crate::markup::Node> = nodes
+            .iter()
+            .filter(|n| {
+                n.name == "identifier"
+                    && n.parent == metadata
+                    && matches!(n.kind, NodeKind::Start | NodeKind::Empty)
+            })
+            .collect();
+
+        let [ident] = idents[..] else {
+            return Outcome::finding(if idents.is_empty() {
+                format!(
+                    "<package unique-identifier=\"{wanted}\"> names an id no element carries, \
+                     and there is no <dc:identifier> to give it to — the book needs an \
+                     identifier before it can name one"
+                )
+            } else {
+                format!(
+                    "<package unique-identifier=\"{wanted}\"> names an id no element carries, \
+                     and the book has {} <dc:identifier> elements; which one is the book's \
+                     identity decides what reading systems key annotations and reading \
+                     position on, so it needs a person",
+                    idents.len()
+                )
+            });
+        };
+
+        let mut edits = Edits::new();
+        // Has an id of its own: move the pointer, not the target. Renaming an id
+        // an element already carries would break any refines="#id" aimed at it.
+        let change = if let Some(existing) = ident.attr("id") {
+            let id = existing.value.clone();
+            edits.replace(wanted_span, format!("unique-identifier=\"{id}\""));
+            format!("pointed the package unique-identifier at the <dc:identifier> id \"{id}\"")
+        } else {
+            // No id: create the one the package is already asking for. An
+            // unusable value gets sanitised and the package attribute follows
+            // it, so the two still agree.
+            let taken: std::collections::HashSet<String> = nodes
+                .iter()
+                .filter_map(|n| n.attr("id"))
+                .map(|a| a.value.clone())
+                .collect();
+            let id = if wanted.is_empty() || is_bad_id(&wanted) || taken.contains(&wanted) {
+                let new = crate::fixers::ids::unique_id(&wanted, &taken);
+                edits.replace(wanted_span, format!("unique-identifier=\"{new}\""));
+                new
+            } else {
+                wanted.clone()
+            };
+            edits.insert(ident.name_end, format!(" id=\"{id}\""));
+            format!("gave the book's <dc:identifier> the id \"{id}\" the package names")
+        };
+
+        book.set_text(&opf_name, edits.apply(&text));
+        Outcome::change(change)
+    }
+}
+
 /// The prefix this package document binds Dublin Core to.
 fn dc_prefix(opf: &str) -> Option<String> {
     let at = opf.find("=\"http://purl.org/dc/elements/1.1/\"")?;
@@ -680,7 +818,16 @@ impl Fixer for ContainerRootfile {
         let mut edits = Edits::new();
         let mut fixed = 0u32;
 
-        for node in nodes.iter().filter(|n| n.name == "rootfile") {
+        // Start and Empty only. An end tag carries no attributes, so it took
+        // the "absent" branch and had ` full-path="..."` written into it —
+        // `</rootfile full-path="...">`, which is not XML. Two real books hit
+        // it, and both were books whose container was *correct*: they simply
+        // spell the element `<rootfile ...></rootfile>` rather than
+        // self-closing, so an end node exists at all.
+        for node in nodes
+            .iter()
+            .filter(|n| n.name == "rootfile" && matches!(n.kind, NodeKind::Start | NodeKind::Empty))
+        {
             match node.attr("full-path") {
                 // Present and pointing somewhere: not ours.
                 Some(a) if !a.value.trim().is_empty() => continue,

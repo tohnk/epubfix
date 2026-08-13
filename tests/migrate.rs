@@ -443,6 +443,33 @@ fn decorative_images_get_empty_alt_and_content_images_are_reported() {
     );
 }
 
+/// An `<img>` written as a pair rather than self-closing. The `</img>` end node
+/// carries no attributes, so without a kind filter it reads as an image with no
+/// alt and no src -- a phantom "needs a caption" finding at best, and ` alt=""`
+/// written into a closing tag at worst.
+#[test]
+fn a_paired_img_tag_is_counted_once_and_its_end_tag_left_alone() {
+    let body = r#"<p><img src="orn.png"></img></p>"#;
+    let (outcome, after) = roundtrip_full(&epub2(body, "<p>x</p>"));
+    let doc = entry(&after, "OEBPS/ch1.xhtml");
+
+    assert!(doc.contains(r#"<img alt="" src="orn.png">"#), "{doc}");
+    assert!(doc.contains("</img>"), "the end tag must be untouched: {doc}");
+    assert!(
+        outcome
+            .changes
+            .iter()
+            .any(|c| c.contains("added alt=\"\" to 1 decorative")),
+        "got {:?}",
+        outcome.changes
+    );
+    assert!(
+        outcome.findings.iter().all(|f| !f.contains("no alt text")),
+        "got {:?}",
+        outcome.findings
+    );
+}
+
 #[test]
 fn img_alt_does_nothing_in_epub3_where_it_is_not_an_error() {
     let body = r#"<p><img src="orn.png"/></p><p><img src="portrait.jpg"/></p>"#;
@@ -479,15 +506,13 @@ fn a_book_that_arrives_broken_is_still_retagged() {
     );
 
     // The defects it arrived with are separately handled on their own merits:
-    // the dead stylesheet include goes, and the fragment that resolves nowhere
-    // is reported rather than guessed at. Neither has any bearing on the gate.
+    // the dead stylesheet include goes, and the same-document link to an anchor
+    // that is nowhere in the book loses its href but keeps its text. Neither has
+    // any bearing on the gate.
     let ch1 = entry(&after, "OEBPS/ch1.xhtml");
     assert!(!ch1.contains("page-template.xpgt"), "{ch1}");
-    assert!(
-        outcome.findings.iter().any(|f| f.contains("#nowhere")),
-        "got {:?}",
-        outcome.findings
-    );
+    assert!(!ch1.contains("#nowhere"), "{ch1}");
+    assert!(ch1.contains(">dangling</a>"), "{ch1}");
 }
 
 #[test]

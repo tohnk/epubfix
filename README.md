@@ -37,9 +37,11 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `media-types` | CSS-007, OPF-035, OPF-037 | replaces a manifest `media-type` that is mistyped or superseded |
 | `manifest-items` | OPF-091, OPF-099 | drops a fragment from a manifest `href`, and the entry a manifest makes for itself |
 | `empty-metadata` | OPF-054 | removes `<dc:*>` elements with no content, keeping the three both versions require |
+| `unique-identifier` | OPF-030 | makes `<package unique-identifier>` and the `<dc:identifier>` id agree, by creating the id or by moving the pointer |
 | `dc-language` | RSC-005 | adds the required `<dc:language>`, taken from what the documents declare or from the text — never from the machine's locale |
 | `fragment-documents` | RSC-005 | gives a bare markup fragment the document *and* the block container XHTML 1.1 needs inside `<body>` |
 | `head-content` | RSC-005 | removes empty elements a `<head>` may not hold, and reports any carrying text |
+| `content-type-meta` | RSC-005 | corrects the `<meta http-equiv="content-type">` value HTML5 fixes, which XHTML 1.1 never checked |
 | `xhtml-namespace` | RSC-005 | declares the XHTML namespace on a root `<html>` missing it, which otherwise fails the whole document |
 | `anchor-names` | RSC-005 | replaces the `name` attribute XHTML 1.1 removed from `<a>` with the `id` it stood for |
 | `xml-ids` | RSC-005 | rewrites `id`/`name` values that are not valid XML Names — in content documents and the NCX — and every fragment pointing at them |
@@ -58,7 +60,7 @@ Done: 1 fixed, 1 already clean, 0 failed.
 | `dangling-resources` | RSC-007 | repoints references whose file moved; drops dead `<link>`/`<script>` includes, and an `<img>` whose file is proven absent — never an `<a>` |
 | `css-paths` | RSC-007 | repoints `url()` and `@import` in stylesheets, and drops dead `@font-face` rules, imports and declarations |
 | `dead-schemes` | HTM-025 | repoints links using a reading system's private scheme (`kindle:`, `calibre:`, …) at what the package says they are for, or drops the `href` when nothing does |
-| `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment |
+| `broken-fragments` | RSC-012 | recovers undefined fragment targets via backlinks or unique relocation, else drops the fragment — and unlinks a same-document one with nothing left to point at |
 | `reference-fragments` | RSC-009, RSC-013 | drops a fragment from a reference to a stylesheet or raster image, which cannot have one |
 | `ncx-dead-entries` | RSC-007 | removes navigation entries pointing at documents that are not in the book |
 | `ncx-pagelist-attrs` | RSC-005 | completes the co-required `id`/`class` pair on a `<pageList>` that carries only one |
@@ -71,8 +73,10 @@ Done: 1 fixed, 1 already clean, 0 failed.
 
 ### EPUB 2 and EPUB 3 are not the same job
 
-Four fixers read the OPF `<package version>` and behave differently either side
-of it. `img-alt` and `version-mismatch` are EPUB 2 only. `data-attributes`
+Five fixers read the OPF `<package version>` and behave differently either side
+of it. `img-alt` and `version-mismatch` are EPUB 2 only, and `content-type-meta`
+is EPUB 3 only — XHTML 1.1 does not check that value at all, so a book only
+meets this one on the way across. `data-attributes`
 removes malformed names in both, but under XHTML 1.1 *every* `data-*` attribute
 is an error — valid name or not — and deleting the well-formed ones would be
 data loss to satisfy a declaration that is very likely the thing at fault, so

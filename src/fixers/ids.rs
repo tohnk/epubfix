@@ -30,7 +30,7 @@ static HREF_RE: LazyLock<Regex> =
     LazyLock::new(|| re(r#"(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')"#));
 
 /// Sanitise `value`, then make sure the result is not already in use.
-fn unique_id(value: &str, taken: &HashSet<String>) -> String {
+pub(crate) fn unique_id(value: &str, taken: &HashSet<String>) -> String {
     let base = sanitise_id(value);
     if !taken.contains(&base) {
         return base;
