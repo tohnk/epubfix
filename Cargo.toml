@@ -1,0 +1,38 @@
+[package]
+name = "epubfix"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Repair common EPUB 2 validation errors in place"
+license = "MIT"
+repository = "https://github.com/tohnk/epubfixer"
+readme = "README.md"
+
+[dependencies]
+percent-encoding = "2.3.2"
+quick-xml = "0.41.0"
+regex = "1.13.1"
+whatlang = "0.18.0"
+# EPUB/OCF permits only Stored and Deflate, so the default codecs (AES, zstd,
+# bzip2, LZMA, PPMd) are dead weight. zlib-rs is pure Rust and needs no C toolchain.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+# Deliberately not panic = "abort". The tool's job is sweeping a whole library,
+# and a bug that crashes on one book used to take the entire run with it. main()
+# catches a panic per book, reports that one as failed and carries on — which
+# only works if panics unwind.
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Noise for a small binary crate: every getter would need an attribute, and the
+# error/panic cases are self-evident from the signatures.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
