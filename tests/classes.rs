@@ -735,7 +735,9 @@ fn an_existing_page_list_is_only_reported_when_the_map_adds_to_it() {
         r#"<page name="2" href="OEBPS/ch1.xhtml#page_2"/>"#,
     );
 
-    // Same pages in both: redundant, and silence is right.
+    // Same pages in both: redundant, so nothing needs a person — but it is
+    // still said out loud, because "removed spine/@page-map" alone is the
+    // report this fixer gave back when it *did* throw the pagination away.
     let (quiet, _) = fix(&page_map_book(
         "page-map.xml",
         pages,
@@ -743,8 +745,16 @@ fn an_existing_page_list_is_only_reported_when_the_map_adds_to_it() {
     ));
     assert!(
         !quiet.findings.iter().any(|f| f.contains("page map")),
-        "got {:?}",
+        "nothing here needs a person: {:?}",
         quiet.findings
+    );
+    assert!(
+        quiet
+            .changes
+            .iter()
+            .any(|c| c.contains("2 print page number(s) in the Adobe page map are already")),
+        "got {:?}",
+        quiet.changes
     );
 
     // The map knows page 2 and the list does not.

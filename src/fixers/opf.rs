@@ -320,12 +320,27 @@ impl Fixer for SpinePageMap {
                 if let Some(already) = listed_pages(&ncx) {
                     // Both spellings present. Only the pages the standard one is
                     // missing are worth anybody's time.
-                    let mut absent: Vec<String> = page_names(book, &map_name)
-                        .into_iter()
-                        .filter(|n| !already.contains(n))
+                    let named = page_names(book, &map_name);
+                    let mut seen = std::collections::HashSet::new();
+                    let mut absent: Vec<String> = named
+                        .iter()
+                        .filter(|n| !already.contains(*n))
+                        .filter(|n| seen.insert((*n).clone()))
+                        .cloned()
                         .collect();
-                    absent.dedup();
-                    if !absent.is_empty() {
+                    if absent.is_empty() {
+                        // Say so. "removed spine/@page-map" on its own is the
+                        // report this fixer used to give when it *did* throw
+                        // the pagination away, and a reader has no way to tell
+                        // the two apart — which is exactly the question the
+                        // line prompted the first time someone ran it on a book
+                        // whose NCX already had the lot.
+                        outcome.push_change(format!(
+                            "the {} print page number(s) in the Adobe page map are already in \
+                             the NCX <pageList>, so only the attribute went",
+                            named.len()
+                        ));
+                    } else {
                         let more = absent.len().saturating_sub(3);
                         absent.truncate(3);
                         outcome.push_finding(format!(
