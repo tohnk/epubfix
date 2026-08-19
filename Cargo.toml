@@ -1,6 +1,6 @@
 [package]
 name = "epubfix"
-version = "1.0.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Repair common EPUB 2 validation errors in place"
