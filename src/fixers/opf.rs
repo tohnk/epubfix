@@ -1880,15 +1880,40 @@ impl Fixer for MimetypeEntry {
 /// OPF-007: `Re-declaration of reserved prefix "rendition"`.
 ///
 /// The `rendition` vocabulary belongs to the EPUB format itself, so a package
-/// that declares it in its own `prefix` attribute says a second time what is
-/// already true — epubcheck reports the warning, and a book whose only flaw
-/// this is still fails a warnings-as-errors sweep. *Quantum Mechanics* and
-/// *Tales from Shakespeare* both carry the declaration and never use the
-/// prefix anywhere, so the repair is a deletion and nothing else.
+/// that binds the prefix in its own `prefix` attribute is saying again what is
+/// already true. *Quantum Mechanics* and *Tales from Shakespeare* both do, and
+/// never use the prefix anywhere, so the repair is a deletion and nothing else.
 ///
-/// A book that *does* use `rendition:` somewhere keeps its declaration: the
-/// prefix is doing real work there, and removing it would break the reference.
+/// # Only when the URI disagrees, which is the whole rule
+///
+/// Re-declaring the prefix is not itself the defect. Measured, epubcheck cares
+/// about one thing — whether the URI the package binds is the reserved one:
+///
+/// ```text
+/// rendition: http://www.idpf.org/vocab/rendition/#   clean
+/// rendition: http://www.idpf.org/vocab/rendition#    OPF-007  (no slash)
+/// rendition: http://example.com/other                OPF-007
+/// schema:    http://schema.org/                      clean
+/// ```
+///
+/// Both library books spell it `…/rendition#`, one slash short of the reserved
+/// URI, which is exactly why they warn. A Hemingway *In Our Time* binds the
+/// reserved URI precisely, epubcheck says nothing about it — and this pass
+/// removed the declaration anyway, editing a book that validated 0/0/0/0 for no
+/// gain at all. A repair with no defect behind it is not a repair.
+///
+/// So the URI comparison is the condition, and re-declaration on its own is
+/// left alone. Only `rendition` is checked, because it is the only reserved
+/// prefix any book in the library rebinds; the rule generalises to the others
+/// the day one of them turns up.
+///
+/// A book that *does* use `rendition:` somewhere keeps its declaration even
+/// when the URI is wrong: the prefix is doing real work there, and dropping the
+/// binding would silently re-point every use of it at the reserved vocabulary.
 pub struct ReservedPrefix;
+
+/// The URI the `rendition` prefix already stands for, per EPUB itself.
+const RENDITION_VOCAB: &str = "http://www.idpf.org/vocab/rendition/#";
 
 impl Fixer for ReservedPrefix {
     fn name(&self) -> &'static str {
@@ -1898,7 +1923,7 @@ impl Fixer for ReservedPrefix {
         &["OPF-007"]
     }
     fn description(&self) -> &'static str {
-        "remove the redundant rendition prefix declaration EPUB itself reserves"
+        "drop a rendition prefix declaration that rebinds the reserved vocabulary to another URI"
     }
 
     fn apply(&self, book: &mut Book) -> Outcome {
@@ -1927,6 +1952,17 @@ impl Fixer for ReservedPrefix {
             return Outcome::none();
         };
 
+        // Bound to the reserved URI, which is what the prefix already means:
+        // saying so twice is not an error and epubcheck does not report it.
+        let bound = if tokens[pos] == "rendition:" {
+            tokens.get(pos + 1).copied().unwrap_or_default()
+        } else {
+            tokens[pos].trim_start_matches("rendition:")
+        };
+        if bound == RENDITION_VOCAB {
+            return Outcome::none();
+        }
+
         // Used anywhere beyond this very declaration? If so it must stay.
         let mut used = text.matches("rendition:").count() > 1;
         for name in book.names() {
@@ -1940,8 +1976,10 @@ impl Fixer for ReservedPrefix {
         }
         if used {
             return Outcome::finding(
-                "the package re-declares the reserved rendition prefix and the book uses it, \
-                 so it stays in place rather than being removed on a guess"
+                "the package binds the reserved rendition prefix to a different URI and the \
+                 book uses the prefix, so it stays: dropping the binding would re-point every \
+                 use of it at the reserved vocabulary, which is a change of meaning and not a \
+                 repair"
                     .to_string(),
             );
         }

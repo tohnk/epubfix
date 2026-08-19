@@ -176,6 +176,40 @@ fn an_unused_reserved_prefix_declaration_is_removed() {
     );
 }
 
+/// Re-declaring the prefix is not the defect; binding it to the *wrong* URI is.
+///
+/// Measured: `rendition: http://www.idpf.org/vocab/rendition/#` is clean, and
+/// the one slash short that the two library books write is `OPF-007`. A
+/// Hemingway *In Our Time* binds the reserved URI exactly, epubcheck reports
+/// 0/0/0/0 on it, and this pass used to rewrite the package anyway.
+#[test]
+fn the_reserved_prefix_bound_to_its_own_uri_is_left_alone() {
+    let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" prefix="schema: http://schema.org/ rendition: http://www.idpf.org/vocab/rendition/# ibooks: http://vocabulary.itunes.apple.com/rdf/ibooks/vocabulary-extensions-1.0/" version="3.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
+    <meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>
+  </metadata>
+  <manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+    let (outcome, out) = roundtrip_kept(&make_text_epub(&with(
+        clean_book(),
+        "OEBPS/content.opf",
+        opf,
+    )));
+
+    let fixed = entry(&out, "OEBPS/content.opf");
+    assert!(
+        fixed.contains("rendition: http://www.idpf.org/vocab/rendition/#"),
+        "the declaration stands: {fixed}"
+    );
+    assert!(
+        !outcome.changes.iter().any(|c| c.contains("rendition")),
+        "nothing to repair, so nothing reported: {:?}",
+        outcome.changes
+    );
+}
+
 /// A mapping is `name: url`, and the removal takes both tokens. A book that
 /// wrote the pair with no space has put the whole mapping in one token, so
 /// taking the next one as well would eat the *following* declaration's name and
@@ -227,7 +261,10 @@ fn a_used_reserved_prefix_is_reported_not_removed() {
         outcome.changes
     );
     assert!(
-        outcome.findings.iter().any(|f| f.contains("uses it")),
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("the book uses the prefix")),
         "got {:?}",
         outcome.findings
     );
