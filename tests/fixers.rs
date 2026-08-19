@@ -819,6 +819,96 @@ fn a_jpeg_spelled_the_long_way_is_left_alone() {
     );
 }
 
+/// A book with no `<dc:identifier>` at all normally needs a person — an
+/// identifier is what reading systems key annotations and reading position to,
+/// so minting one changes the book's identity. A Princeton *Either/Or* is the
+/// exception: it says what its identifier is twice over, in the id the package
+/// already names and in the name of the package file itself.
+fn no_identifier_book(unique_id: &str, opf_at: &str) -> Vec<u8> {
+    let opf = format!(
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="{unique_id}">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Either/Or</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
+</package>"#
+    );
+    let container = format!(
+        r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="{opf_at}" media-type="application/oebps-package+xml"/></rootfiles></container>"#
+    );
+    let ch1 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>x</p></body></html>"#;
+    make_epub(&[
+        ("META-INF/container.xml", container.as_bytes()),
+        (opf_at, opf.as_bytes()),
+        ("OEBPS/toc.ncx", common::CLEAN_NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+    ])
+}
+
+#[test]
+fn a_missing_identifier_is_written_from_the_isbn_the_book_already_names() {
+    let (changes, out) = roundtrip(&no_identifier_book("p9781400846931", "OEBPS/content.opf"));
+    let opf = entry(&out, "OEBPS/content.opf");
+
+    // The id the package was already pointing at, so the pointer is untouched.
+    assert!(
+        opf.contains(
+            r#"<dc:identifier id="p9781400846931">urn:isbn:9781400846931</dc:identifier>"#
+        ),
+        "got {opf}"
+    );
+    assert!(
+        opf.contains(r#"unique-identifier="p9781400846931""#),
+        "{opf}"
+    );
+    assert!(
+        changes.iter().any(|c| c.contains("urn:isbn:")),
+        "{changes:?}"
+    );
+}
+
+/// The other half of the evidence: the package file is named after the ISBN.
+#[test]
+fn the_isbn_is_taken_from_the_package_filename_when_the_id_has_none() {
+    let (_, out) = roundtrip(&no_identifier_book("BookId", "OEBPS/9781400846931.opf"));
+    assert!(
+        entry(&out, "OEBPS/9781400846931.opf")
+            .contains(r#"<dc:identifier id="BookId">urn:isbn:9781400846931</dc:identifier>"#),
+        "got {}",
+        entry(&out, "OEBPS/9781400846931.opf")
+    );
+}
+
+/// Nothing is invented on weak evidence. Thirteen digits, a 978/979 prefix and
+/// a valid check digit together are what make the match a certainty; drop any
+/// one and the book goes back to needing a person.
+#[test]
+fn a_number_that_is_not_certainly_an_isbn_is_never_written() {
+    for (id, why) in [
+        ("BookId", "no digits at all"),
+        ("p9781400846932", "check digit is wrong"),
+        ("p1234567890123", "not a 978/979 prefix"),
+        ("p978140084693", "twelve digits"),
+    ] {
+        let (changes, out) = roundtrip(&no_identifier_book(id, "OEBPS/content.opf"));
+        assert!(
+            !entry(&out, "OEBPS/content.opf").contains("urn:isbn:"),
+            "{why}: nothing should have been written, got {}",
+            entry(&out, "OEBPS/content.opf")
+        );
+        assert!(
+            !changes.iter().any(|c| c.contains("urn:isbn:")),
+            "{why}: {changes:?}"
+        );
+    }
+}
+
 /// An unsafe *directory* component is the same error as an unsafe basename —
 /// measured, a Word-saved *Sound and the Fury* keeps its images under
 /// `the sound and the fury_files/`, and every reference to them is RSC-020 —

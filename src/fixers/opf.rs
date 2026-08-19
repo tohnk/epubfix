@@ -1780,6 +1780,20 @@ impl Fixer for UniqueIdentifier {
             .collect();
 
         let [ident] = idents[..] else {
+            // No identifier at all, but the book may already say what its
+            // identifier *is* — see [`isbn13`] and the note on this fixer.
+            if idents.is_empty()
+                && let Some(isbn) = isbn13(&wanted).or_else(|| isbn13(basename(&opf_name)))
+                && let Some(edit) = write_identifier(&text, &nodes, &wanted, &isbn)
+            {
+                let mut edits = Edits::new();
+                edits.insert(edit.0, edit.1);
+                book.set_text(&opf_name, edits.apply(&text));
+                return Outcome::change(format!(
+                    "wrote the <dc:identifier> the package was already naming, from the \
+                     ISBN the book spells out for itself (urn:isbn:{isbn})"
+                ));
+            }
             return Outcome::finding(if idents.is_empty() {
                 format!(
                     "<package unique-identifier=\"{wanted}\"> names an id no element carries, \
@@ -2545,6 +2559,65 @@ fn meta_text(src: &str, nodes: &[Node], i: usize) -> String {
     nodes[i]
         .close
         .map_or_else(String::new, |c| src[nodes[i].span.end..nodes[c].span.start].trim().to_string())
+}
+
+/// The ISBN-13 a string carries, if it carries one beyond doubt.
+///
+/// Three conditions, and all three matter. Exactly **thirteen** digits, so a
+/// year or a page count cannot qualify. A **978 or 979** prefix, which is the
+/// whole of the ISBN range and anchors the match to something that is trying to
+/// be an ISBN. And a valid **check digit**, which a run of digits passes by
+/// accident one time in ten.
+///
+/// Together those make a false positive something close to impossible: a
+/// thirteen-digit string starting 978 whose checksum also lands is not a
+/// coincidence, it is an ISBN somebody wrote down.
+fn isbn13(text: &str) -> Option<String> {
+    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() != 13 || !(digits.starts_with("978") || digits.starts_with("979")) {
+        return None;
+    }
+    let sum: u32 = digits
+        .bytes()
+        .enumerate()
+        .map(|(i, b)| u32::from(b - b'0') * if i % 2 == 0 { 1 } else { 3 })
+        .sum();
+    sum.is_multiple_of(10).then_some(digits)
+}
+
+/// Where to put a new `<dc:identifier id="{wanted}">urn:isbn:{isbn}</…>`, and
+/// what to write there.
+///
+/// Same placement rule as [`DcLanguage`]: line up with the other children of
+/// `<metadata>` and insert at the start of the closing tag's line, so the
+/// indentation already sitting there is not counted twice. The prefix is the
+/// one the file actually binds for Dublin Core rather than an assumed `dc`.
+fn write_identifier(
+    text: &str,
+    nodes: &[Node],
+    wanted: &str,
+    isbn: &str,
+) -> Option<(usize, String)> {
+    let metadata = nodes
+        .iter()
+        .position(|n| n.name == "metadata" && n.kind == NodeKind::Start)?;
+    let close = nodes[metadata].close?;
+    let close_at = nodes[close].span.start;
+    let line_start = text[..close_at].rfind('\n').map_or(0, |i| i + 1);
+    let indent = nodes
+        .iter()
+        .rfind(|n| n.parent == Some(metadata) && n.kind != NodeKind::End)
+        .map_or_else(
+            || format!("{}  ", line_indent(text, close_at)),
+            |last| line_indent(text, last.span.start),
+        );
+    let prefix = dc_prefix(text).unwrap_or_else(|| "dc".to_string());
+    Some((
+        line_start,
+        format!(
+            "{indent}<{prefix}:identifier id=\"{wanted}\">urn:isbn:{isbn}</{prefix}:identifier>\n"
+        ),
+    ))
 }
 
 /// RSC-005 / OPF-085: a `dc:identifier` that claims a UUID it does not carry.
