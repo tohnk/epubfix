@@ -40,7 +40,7 @@ use crate::fixers::{Fixer, Outcome};
 use crate::markup::{Edits, scan};
 use crate::paths::{Resolution, Resolver, relative_to};
 use crate::refs::resolve_href;
-use crate::util::{basename, dirname, ends_with_any};
+use crate::util::{IMAGE_EXTENSIONS, basename, dirname, ends_with_any, sniff_image};
 
 /// Characters that are an error in an OCF file name however it is referenced.
 ///
@@ -251,10 +251,19 @@ impl Fixer for UnsafeFilenames {
             }
             let base = basename(name);
             let base_needs = !base.is_empty() && needs_rename(base, spelled_raw);
-            if !base_needs && !dir_unsafe(dirname(name)) {
+            let wrong_ext = mislabelled_extension(book, name);
+            if !base_needs && wrong_ext.is_none() && !dir_unsafe(dirname(name)) {
                 continue;
             }
             let mut candidate = safe_path(name, base_needs);
+            // The name may be safe and still wrong: a `.jpg` holding a PNG.
+            if let Some(ext) = wrong_ext {
+                let stem = candidate
+                    .rfind('.')
+                    .filter(|i| *i > candidate.rfind('/').map_or(0, |s| s + 1))
+                    .map_or(candidate.as_str(), |i| &candidate[..i]);
+                candidate = format!("{stem}.{ext}");
+            }
             // Two different originals can sanitise to the same thing, and the
             // sanitised name may already be in use. Either way we must not
             // silently drop an entry by writing two of them to one name.
@@ -433,6 +442,36 @@ fn rewritten_references(book: &Book, moved: &HashMap<&str, &str>) -> Vec<(String
         }
     }
     out
+}
+
+/// The extension an image file *should* have, when the one it has disagrees
+/// with what its bytes say it is.
+///
+/// A Gutenberg *Dracula* ships a PNG named `cover.jpg`, which epubcheck reports
+/// as `PKG-022 Wrong file extension for image`. Correcting the manifest's
+/// `media-type` alone leaves that warning standing — measured, the name has to
+/// move too, and only then is the book clean:
+///
+/// ```text
+/// PNG bytes, cover.jpg, image/jpeg    OPF-029 + PKG-022
+/// PNG bytes, cover.jpg, image/png     PKG-022
+/// PNG bytes, cover.png, image/png     clean
+/// ```
+///
+/// Only a disagreement between two *image* extensions counts. A PNG called
+/// `cover.bin` is somebody's deliberate business, and renaming files on the
+/// strength of four magic bytes is worth confining to the case that is plainly
+/// a mistake.
+fn mislabelled_extension(book: &Book, name: &str) -> Option<&'static str> {
+    let have = basename(name).rsplit_once('.')?.1.to_ascii_lowercase();
+    if !IMAGE_EXTENSIONS.contains(&format!(".{have}").as_str()) {
+        return None;
+    }
+    let (want, _) = sniff_image(book.bytes(name)?)?;
+    // `.jpeg` and `.jpg` are the same format spelled two ways, and epubcheck
+    // accepts both — a rename between them would be churn for nothing.
+    let same = want == have || (want == "jpg" && have == "jpeg");
+    (!same).then_some(want)
 }
 
 /// Attributes whose value is a path into the container.

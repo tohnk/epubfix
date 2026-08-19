@@ -435,11 +435,20 @@ fn build(v3: bool, ch1_body: &str, ch2_body: &str) -> Vec<u8> {
         .iter()
         .map(|p| format!("OEBPS/{p}"))
         .collect();
-    files.extend(
-        images
-            .iter()
-            .map(|p| (p.as_str(), b"\xFF\xD8\xFF\xE0".as_slice())),
-    );
+    // Bytes that agree with the name. Every image used to get a JPEG signature
+    // whatever it was called, so a fixture declaring `image/png` for `orn.png`
+    // was shipping a JPEG under a PNG name — the exact defect `filenames` and
+    // `media-types` now read the signature to catch, and they caught it here
+    // first.
+    files.extend(images.iter().map(|p| {
+        let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        let bytes: &[u8] = match ext.as_str() {
+            "png" => b"\x89PNG\r\n\x1A\n",
+            "gif" => b"GIF89a",
+            _ => b"\xFF\xD8\xFF\xE0",
+        };
+        (p.as_str(), bytes)
+    }));
     make_epub(&files)
 }
 

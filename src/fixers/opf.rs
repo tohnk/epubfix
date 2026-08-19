@@ -501,6 +501,20 @@ impl Fixer for SpineToc {
 ///   `text/x-oeb1-css` — left behind by a converter.
 ///
 /// Measured: each of the three validates clean once the type is corrected.
+///
+/// # A fourth source, which is the file rather than the table
+///
+/// The table above is a pure relabelling — the same resource under its current
+/// name. `OPF-029` is the other direction: the label disagrees with the *bytes*.
+/// A Gutenberg *Dracula* declares `image/jpeg` for a `cover.jpg` that is a PNG,
+/// and epubcheck reads the signature and objects. So an item whose file sniffs
+/// to a known image format and whose declared type is a *different* image type
+/// is corrected from the bytes.
+///
+/// Only image-to-image, deliberately. A font or a stylesheet whose declared
+/// type looks odd is not something four magic bytes should be allowed to
+/// overrule, and the extension half of the same defect belongs to
+/// [`crate::fixers::filenames::UnsafeFilenames`], which is where renames live.
 pub struct MediaTypes;
 
 /// `wrong media type -> what it means now`.
@@ -548,14 +562,29 @@ impl Fixer for MediaTypes {
             };
             // Exact match on the whole attribute value. A substring rewrite
             // would turn "text/html-something" into nonsense.
-            let Some((_, right)) = MEDIA_TYPES
+            let declared = attr.value.trim();
+            let from_table = MEDIA_TYPES
                 .iter()
-                .find(|(wrong, _)| attr.value.trim() == *wrong)
-            else {
+                .find(|(wrong, _)| declared == *wrong)
+                .map(|(_, right)| *right);
+            // Else ask the file itself, for an image whose label its bytes
+            // contradict.
+            let from_bytes = || {
+                if !declared.starts_with("image/") {
+                    return None;
+                }
+                let target = node
+                    .attr("href")
+                    .and_then(|h| resolve_href(&opf_name, &h.value))
+                    .map(|(t, _)| t)?;
+                let (_, real) = crate::util::sniff_image(book.bytes(&target)?)?;
+                (real != declared).then_some(real)
+            };
+            let Some(right) = from_table.or_else(from_bytes) else {
                 continue;
             };
             edits.replace(attr.span.clone(), format!("media-type=\"{right}\""));
-            fixed.push(attr.value.trim().to_string());
+            fixed.push(declared.to_string());
         }
 
         if fixed.is_empty() {

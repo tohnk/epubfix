@@ -440,6 +440,19 @@ impl Book {
     /// [`Book::save`] writes every text entry as UTF-8, so these are already
     /// repaired in memory — but as with the mimetype, nothing would notice, and
     /// a book whose only defect was its encoding would never be rewritten.
+    /// The raw bytes of an entry, textual or not.
+    ///
+    /// [`Book::text`] only answers for entries that decoded as text, and some
+    /// questions are about the bytes themselves — whether a file called
+    /// `cover.jpg` is actually a PNG, for one.
+    pub fn bytes(&self, name: &str) -> Option<&[u8]> {
+        let name = self.renamed_from.get(name).map_or(name, String::as_str);
+        self.entries
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| &*e.data)
+    }
+
     pub fn transcoded(&self) -> &[String] {
         &self.transcoded
     }

@@ -726,6 +726,99 @@ fn an_unclosed_list_item_does_not_panic_the_nav_sorter() {
     assert!(got.contains("Two") && got.contains("One"), "got {got}");
 }
 
+/// A file's name and the manifest's label are both claims; the bytes are the
+/// fact. A Gutenberg *Dracula* ships a PNG called `cover.jpg` declared
+/// `image/jpeg`, which is two messages at once — and correcting only one of
+/// them leaves the other standing:
+///
+/// ```text
+/// PNG bytes, cover.jpg, image/jpeg    OPF-029 + PKG-022
+/// PNG bytes, cover.jpg, image/png     PKG-022
+/// PNG bytes, cover.png, image/png     clean
+/// ```
+#[test]
+fn an_image_whose_bytes_contradict_its_name_is_renamed_and_relabelled() {
+    // A real 1x1 PNG: the signature is what the repair reads.
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img" href="cover.jpg" media-type="image/jpeg"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
+</package>"#;
+    let ch1 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p><img src="cover.jpg" alt="c"/></p></body></html>"#;
+    let (changes, out) = roundtrip(&make_epub(&[
+        ("META-INF/container.xml", common::CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", common::CLEAN_NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/cover.jpg", PNG),
+    ]));
+
+    assert!(has(&out, "OEBPS/cover.png"), "{:?}", names(&out));
+    assert!(!has(&out, "OEBPS/cover.jpg"));
+    let opf_after = entry(&out, "OEBPS/content.opf");
+    assert!(opf_after.contains(r#"href="cover.png""#), "{opf_after}");
+    assert!(
+        opf_after.contains(r#"media-type="image/png""#),
+        "{opf_after}"
+    );
+    // Every reference follows, not just the manifest's.
+    assert!(entry(&out, "OEBPS/ch1.xhtml").contains(r#"src="cover.png""#));
+    assert!(
+        changes.iter().any(|c| c.contains("media-type")),
+        "{changes:?}"
+    );
+    assert!(changes.iter().any(|c| c.contains("renamed")), "{changes:?}");
+    // The bytes themselves are untouched.
+    assert_eq!(
+        out.iter()
+            .find(|(n, _)| n == "OEBPS/cover.png")
+            .map(|(_, d)| d.as_slice()),
+        Some(PNG)
+    );
+}
+
+/// `.jpeg` and `.jpg` are one format spelled two ways and epubcheck accepts
+/// both, so a rename between them would be churn for nothing.
+#[test]
+fn a_jpeg_spelled_the_long_way_is_left_alone() {
+    const JPG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46];
+    let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">urn:uuid:1234-5678</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img" href="cover.jpeg" media-type="image/jpeg"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="ch1"/></spine>
+</package>"#;
+    let ch1 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p><img src="cover.jpeg" alt="c"/></p></body></html>"#;
+    let (changes, out) = roundtrip(&make_epub(&[
+        ("META-INF/container.xml", common::CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/toc.ncx", common::CLEAN_NCX.as_bytes()),
+        ("OEBPS/ch1.xhtml", ch1.as_bytes()),
+        ("OEBPS/cover.jpeg", JPG),
+    ]));
+    assert!(has(&out, "OEBPS/cover.jpeg"), "{:?}", names(&out));
+    assert!(
+        !changes.iter().any(|c| c.contains("renamed")),
+        "{changes:?}"
+    );
+}
+
 /// An unsafe *directory* component is the same error as an unsafe basename —
 /// measured, a Word-saved *Sound and the Fury* keeps its images under
 /// `the sound and the fury_files/`, and every reference to them is RSC-020 —
